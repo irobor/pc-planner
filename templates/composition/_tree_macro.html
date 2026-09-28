@@ -1,0 +1,105 @@
+{# app/templates/composition/_tree_macro.html #}
+{# ------------------------------------------------------------------ #}
+{# Рекурсивный макрос отрисовки узла-отдела дерева состава.            #}
+{#                                                                     #}
+{# Вынесен из composition/tree.html, когда у дерева появился второй    #}
+{# потребитель — экран «Работы бюро» в разделе планировщика. Две копии #}
+{# рекурсивного макроса разошлись бы при первой же правке.             #}
+{#                                                                     #}
+{# Подключение в шаблоне-странице:                                     #}
+{#     {% import "composition/_tree_macro.html" as tree_macro %}       #}
+{#     {{ tree_macro.render_dept(root, manageable_ids, expanded_ids) }}#}
+{#                                                                     #}
+{# ВАЖНО про import: макрос НЕ видит контекст страницы (request, user, #}
+{# can). Всё нужное передаётся аргументами — включая рекурсивный вызов #}
+{# внутри самого макроса.                                              #}
+{# ------------------------------------------------------------------ #}
+
+{% macro render_dept(node, manageable_ids, expanded_ids, can_create=False) %}
+{% set is_mine = node.department.id in manageable_ids %}
+{% set is_open = node.department.id in expanded_ids %}
+{% set body_id = "dept-body-" ~ node.department.id %}
+<li class="composition-tree__item">
+
+  {# Заголовок узла. Чужой отдел приглушается — но только сам заголовок #}
+  {# и его марки: внутри чужого отдела может лежать СВОЁ бюро, и       #}
+  {# гасить его нельзя (ТЕХН внутри ОТ у начальника бюро).             #}
+  <div class="composition-tree__dept{% if not is_mine %} composition-tree__muted{% endif %}">
+    {# Переключатель ветки — только у узлов, которым есть что прятать. #}
+    {% if node.markas or node.children %}
+    <a class="composition-tree__toggle{% if not is_open %} collapsed{% endif %}"
+       data-bs-toggle="collapse"
+       href="#{{ body_id }}"
+       role="button"
+       aria-expanded="{{ 'true' if is_open else 'false' }}"
+       aria-controls="{{ body_id }}">
+      <span class="composition-tree__caret" aria-hidden="true">&#9662;</span>
+    </a>
+    {% endif %}
+    <span class="fw-semibold">{{ node.department.code }}</span>
+    <span class="text-muted">— {{ node.department.name }}</span>
+    {% if not is_mine %}
+    <span class="badge bg-light text-secondary border">только просмотр</span>
+    {% endif %}
+  </div>
+
+  {# Тело узла под collapse: марки и дочерние отделы.                  #}
+  {# show — если в ветке есть что-то своё; иначе свёрнуто.             #}
+  <div class="collapse{% if is_open %} show{% endif %}" id="{{ body_id }}">
+
+    {# Марки, назначенные ГИПом этому отделу. У промежуточного         #}
+    {# отдела-родителя markas пуст — блок просто не отрисуется.        #}
+    {% if node.markas %}
+    <ul class="composition-tree__markas{% if not is_mine %} composition-tree__muted{% endif %}">
+      {% for marka in node.markas %}
+      <li class="composition-tree__marka">
+        {# Марка: код + название, стадия — бейджем рядом. #}
+        <span class="fw-medium">{{ marka.marka_type.code }}</span>
+        <span class="text-muted">{{ marka.marka_type.name }}</span>
+        <span class="badge bg-secondary">{{ marka.stage.stage_name }}</span>
+        {# Кнопка заведения шифра. Два условия: право set:manage
+        (передаётся флагом — макрос подключён через import и инъектор
+        can не видит) И принадлежность отдела области управления.
+        Серверная проверка повторяет оба: гашение кнопки защитой не
+        является. #}
+        {% if can_create and is_mine %}
+        <button type="button"
+                class="btn btn-outline-primary btn-sm ms-2"
+                data-bs-toggle="modal"
+                data-bs-target="#createSetModal"
+                data-composition-id="{{ marka.composition_id }}"
+                data-department-id="{{ node.department.id }}">
+          + Шифр
+        </button>
+        {% endif %}
+
+        {# Комплекты (уровень 2): шифры, заведённые начальником бюро.  #}
+        {# Пусто — приглушённая пометка, что шифр ещё не заведён.      #}
+        {% if marka.sets %}
+        <ul class="composition-tree__sets">
+          {% for set_item in marka.sets %}
+          <li class="composition-tree__set">{{ set_item.marka_full }}</li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <div class="composition-tree__set text-muted fst-italic">
+          Шифр не заведён
+        </div>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    {# Дочерние отделы — рекурсивный вызов макроса. #}
+    {% if node.children %}
+    <ul class="composition-tree__children">
+      {% for child in node.children %}
+            {{ render_dept(child, manageable_ids, expanded_ids, can_create) }}
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+  </div>
+</li>
+{% endmacro %}

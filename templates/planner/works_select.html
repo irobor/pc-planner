@@ -1,0 +1,32 @@
+{% extends "layouts/section.html" %}
+
+{% block title %}Работы бюро{% endblock %}
+
+{% block sidebar %}
+  {{ nav_item("/planner/works", "Работы") }}
+  {{ nav_item("/planner/workload", "Загрузка") }}
+  {{ nav_item("/planner/employees", "Сотрудники") }}
+{% endblock %}
+
+{% block section_content %}
+<h1 class="h4 mb-3">Работы бюро</h1>
+
+{% if projects %}
+  <p class="text-muted">Выберите состав проекта:</p>
+  <div class="list-group">
+    {% for p in projects %}
+    <a href="/planner/works?project={{ p.id }}&status={{ status_key }}"
+       class="list-group-item list-group-item-action">
+      <span class="fw-semibold">{{ p.code }}</span>
+      <span class="text-muted">— {{ p.title }}</span>
+    </a>
+    {% endfor %}
+  </div>
+{% else %}
+  {# Пустая область — законное состояние: у бюро может не быть работы,
+     а у пользователя без назначения область пуста вовсе. #}
+  <div class="alert alert-light border">
+    Нет составов проектов, в которых участвует ваше подразделение.
+  </div>
+{% endif %}
+{% endblock %}

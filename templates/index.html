@@ -1,0 +1,21 @@
+{% extends "layouts/app.html" %}
+
+{% block title %}Главная{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+    <h1 class="h3 mb-3">Главная</h1>
+    <p class="text-muted">
+      Вы вошли как <strong>{{ user.display_name }}</strong>.
+    </p>
+    <a href="/planner" class="btn btn-primary">Перейти к планировщику</a>
+
+    <!-- logout — действие с побочным эффектом, поэтому POST-форма, а не ссылка.
+         d-inline, чтобы форма встала в ряд с соседней кнопкой. -->
+    <form method="post" action="/logout" class="d-inline">
+      <button type="submit" class="btn btn-outline-secondary">Выйти</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

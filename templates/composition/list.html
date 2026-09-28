@@ -1,0 +1,53 @@
+{% extends "layouts/app.html" %}
+
+{% block title %}Состав проекта{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+    {# Шапка: заголовок слева, кнопка создания справа (flex). Кнопка #}
+    {# видна только при праве редактирования — иначе клик привёл бы #}
+    {# на 403. Проверка через can() из инъектора контекста: то же #}
+    {# правило, что на сервере, включая обход для роли admin. #}
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h1 class="h3 mb-0">Состав проекта</h1>
+      {% if can("composition:manage") %}
+      <a href="/project-composition/new" class="btn btn-primary">
+        + Создать состав
+      </a>
+      {% endif %}
+    </div>
+
+    {# Показываем таблицу только если есть проекты с составом. #}
+    {# Иначе — явное пустое состояние, а не пустая таблица (правило 17). #}
+    {% if projects %}
+    <table class="table table-striped table-hover align-middle">
+      <thead>
+        <tr>
+          <th scope="col">Шифр</th>
+          <th scope="col">Наименование</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for project in projects %}
+        <tr>
+          {# Шифр — ссылка на дерево состава проекта. Роут существует #}
+          {# (GET /project-composition/{id}), поэтому ссылка активна. #}
+          <td>
+            <a href="/project-composition/{{ project.id }}">
+              {{ project.code }}
+            </a>
+          </td>
+          <td>{{ project.title }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="alert alert-info" role="alert">
+      Нет проектов с заполненным составом.
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

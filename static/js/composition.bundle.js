@@ -1,0 +1,1 @@
+import{c as r,j as t,R as s}from"./client.js";import{C as c}from"./CompositionEditor.js";const o=document.getElementById("composition-root");if(o){const e=Number(o.dataset.projectId);r.createRoot(o).render(t.jsx(s.StrictMode,{children:t.jsx(c,{projectId:e})}))}

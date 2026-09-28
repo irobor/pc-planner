@@ -1,0 +1,81 @@
+{# app/templates/planner/workload.html #}
+{% extends "layouts/section.html" %}
+
+{% block title %}Загрузка бюро{% endblock %}
+
+{% block sidebar %}
+  {{ nav_item("/planner/works", "Работы") }}
+  {{ nav_item("/planner/workload", "Загрузка") }}
+  {{ nav_item("/planner/employees", "Сотрудники") }}
+{% endblock %}
+
+{% block section_content %}
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h1 class="h4 mb-0">Загрузка бюро</h1>
+
+  {# Выбор подразделения — обычная GET-форма без JS: смена бюро меняет
+     адрес, и страница со ссылкой остаётся воспроизводимой (можно
+     переслать коллеге или положить в закладки). Островок при
+     монтировании читает итоговый выбор из data-department-id. #}
+  {% if departments %}
+  <form method="get" action="/planner/workload" class="d-flex align-items-center gap-2">
+    <label for="departmentSelect" class="form-label mb-0 text-muted small">
+      Подразделение
+    </label>
+    <select id="departmentSelect" name="department"
+            class="form-select form-select-sm workload-dept-select"
+            onchange="this.form.submit()">
+      {% for item in departments %}
+      <option value="{{ item.id }}"
+              {% if item.id == selected_department_id %}selected{% endif %}>
+        {{ item.code }} — {{ item.name }}
+      </option>
+      {% endfor %}
+    </select>
+    {# Запасная кнопка на случай отключённого JS: onchange тогда не
+       сработает, а отправить форму всё равно надо. #}
+    <noscript>
+      <button type="submit" class="btn btn-sm btn-outline-secondary">
+        Показать
+      </button>
+    </noscript>
+  </form>
+  {% endif %}
+</div>
+
+{% if not departments %}
+  {# Область управления пуста: у пользователя нет назначения либо в его
+     подразделениях никто не числится. Показываем причину, а не пустую
+     сетку — иначе выглядит как поломка. #}
+  <div class="alert alert-info" role="alert">
+    Нет подразделений, доступных для просмотра загрузки.
+    Обратитесь к администратору, если это не так.
+  </div>
+{% else %}
+  {# Точка монтирования React-острова.
+     Данные сетки сюда НЕ подставляются: островок забирает их сам через
+     GET /api/planning/workload. В data-* уезжают только начальные
+     параметры — что показывать и от какой даты отсчитывать.
+
+     Содержимое div'а — заглушка на время загрузки бандла; React её
+     затирает при монтировании. #}
+    <div id="workload-root"
+       class="workload-root"
+       data-department-id="{{ selected_department_id }}"
+       data-today="{{ today }}"
+       data-can-edit="{{ 'true' if can_edit else 'false' }}">
+    <div class="text-muted py-5 text-center">
+      Подключение сетки…
+    </div>
+  </div>
+{% endif %}
+
+{% endblock %}
+
+{% block extra_js %}
+  {# Островок сетки загрузки. Бандл собирается Vite из src/workload.jsx
+     (vite.config.js, вход workload). Хэша в имени нет намеренно —
+     после пересборки нужен hard-refresh браузера. #}
+  <script type="module" src="/static/js/workload.bundle.js"></script>
+{% endblock %}

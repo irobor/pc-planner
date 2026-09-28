@@ -1,0 +1,579 @@
+/* static/css/base.css */
+body {
+    margin: 0;
+    font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    background-color: #f8fafc;
+    color: #334155;
+}
+
+.main-header {
+    background-color: #1e293b;
+    color: #ffffff;
+    padding: 1rem 2rem;
+}
+
+.nav-container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+}
+
+.nav-container a {
+    color: white;
+    text-decoration: none;
+}
+
+.nav-links {
+    list-style: none;
+    display: flex;
+    gap: 1.5rem;
+    margin: 0;
+    padding: 0;
+}
+
+.main-content {
+    flex: 1;
+    max-width: 1200px;
+    margin: 2rem auto;
+    width: 100%;
+    padding: 0 1rem;
+    box-sizing: border-box;
+}
+
+.main-footer {
+    background-color: #f1f5f9;
+    text-align: center;
+    padding: 1rem;
+    font-size: 0.9rem;
+    color: #64748b;
+    border-top: 1px solid #e2e8f0;
+}
+
+/* ==========================================================================
+   Дерево состава проекта (composition/tree.html)
+   Отступы произвольной глубины Bootstrap-классами ms-* не покрыть,
+   поэтому вложенность оформляется здесь. Классы по БЭМ-подобной схеме.
+   ========================================================================== */
+
+/* Корневой список дерева — убираем маркеры и стандартный отступ ul. */
+.composition-tree,
+.composition-tree__children,
+.composition-tree__markas,
+.composition-tree__sets {
+    list-style: none;
+    padding-left: 0;
+    margin-bottom: 0;
+}
+
+/* Каждый уровень вложенности сдвигаем вправо и подчёркиваем линией слева,
+   чтобы визуально читалась иерархия отдел → бюро → марка → комплект. */
+.composition-tree__children,
+.composition-tree__markas {
+    padding-left: 1.5rem;
+    border-left: 1px solid #dee2e6;  /* цвет границ Bootstrap (--bs-border-color) */
+    margin-left: 0.5rem;
+}
+
+/* Отступы между узлами для читаемости. */
+.composition-tree__item,
+.composition-tree__marka {
+    padding: 0.25rem 0;
+}
+
+/* Комплекты — ещё один уровень отступа, мельче и приглушённее. */
+.composition-tree__sets {
+    padding-left: 1.5rem;
+}
+
+.composition-tree__set {
+    padding: 0.1rem 0;
+    font-size: 0.9rem;
+}
+/* ------------------------------------------------------------------ */
+/* Редактор состава проекта (React-корзина, Часть 2.3).               */
+/* ------------------------------------------------------------------ */
+
+/* Выпадающий список подсказок (марок в редакторе, шифров на /new).
+   Тень задаём здесь, а НЕ Bootstrap-классом shadow-sm: держим оформление
+   в одном месте и не конфликтуем по специфичности. В разметке класс
+   shadow-sm убран, поэтому эта тень — единственная. */
+.composition-dropdown {
+    z-index: 1000;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.25);
+    margin-top: 0.25rem;
+}
+
+/* Фон красим на САМИ строки списка, а не на контейнер <ul>: у Bootstrap
+   list-group-item свой фон, который перекрыл бы фон контейнера. Селектор
+   с вложенностью (.composition-dropdown .list-group-item) достаточно
+   специфичен, чтобы победить одиночный .list-group-item из Bootstrap. */
+.composition-dropdown .list-group-item {
+    background-color: #ffffff;
+}
+
+/* Приглушение чужих узлов дерева состава: видно, но видно, что не своё.
+   Класс вешается ТОЛЬКО на заголовок отдела и его марки — потомки под
+   collapse не наследуют, иначе своё бюро внутри чужого отдела тоже
+   поблёкло бы. */
+.composition-tree__muted {
+    opacity: 0.55;
+}
+
+/* Треугольник-переключатель ветки. Символ живёт в разметке, а не в
+   content: без CSS он всё равно виден, и ветку можно раскрыть. Стили
+   отвечают только за поворот. */
+.composition-tree__toggle {
+    display: inline-block;
+    width: 1rem;
+    text-decoration: none;
+    color: inherit;
+}
+
+.composition-tree__caret {
+    display: inline-block;
+    transition: transform 0.15s ease-in-out;
+}
+
+/* Bootstrap сам вешает .collapsed на свёрнутый переключатель. */
+.composition-tree__toggle.collapsed .composition-tree__caret {
+    transform: rotate(-90deg);
+}
+/* ==========================================================================
+   Боковое меню раздела (layouts/section.html) — ярус 2 навигации.
+   ========================================================================== */
+
+/* Вертикальная линия отделяет меню от содержимого. Только с lg: ниже
+   этой ширины сайдбар встаёт НАД контентом, и линия справа была бы
+   бессмысленной. Bootstrap-класса под условную границу нет. */
+@media (min-width: 992px) {
+    .section-sidebar {
+        border-right: 1px solid #dee2e6;  /* --bs-border-color */
+        min-height: 100%;
+        padding-right: 0.5rem;
+    }
+}
+
+/* ==========================================================================
+   Дерево работ бюро в виде таблицы (planner/_tree_table.html).
+   Отступы уровней — классами, а не вложенными списками: иначе колонки
+   данных не выровнялись бы по вертикали.
+   ========================================================================== */
+
+.planner-tree__level-0 { padding-left: 0.5rem; }
+.planner-tree__level-1 { padding-left: 2rem; }
+.planner-tree__level-2 { padding-left: 3.5rem; }
+.planner-tree__level-3 { padding-left: 5rem; }
+.planner-tree__level-4 { padding-left: 6.5rem; }
+
+/* Приглушение чужих строк: видно, но видно, что не своё. */
+.planner-tree__muted {
+    opacity: 0.55;
+}
+
+/* Шифр — моноширинным: так выравниваются одинаковые префиксы и глаз
+   быстрее находит различающийся хвост (#1, .ЗД.АТХ). */
+.planner-tree__code {
+    font-family: var(--bs-font-monospace);
+}
+
+/* Строка шифра кликабельна целиком — открывает карточку. Курсор и
+   подсветка обязательны: без них по строке просто не станут нажимать. */
+.planner-tree__set-row {
+    cursor: pointer;
+}
+
+.planner-tree__set-row:hover {
+    background-color: #f1f5f9;
+}
+
+/* Фиксированные ширины колонок данных: первая колонка (иерархия)
+   забирает остаток. Без этого таблица пересчитывала бы ширины под
+   содержимое, и колонки прыгали бы при смене проекта. */
+.planner-tree__col-days { width: 4.5rem; }
+.planner-tree__col-term     { width: 11rem; }
+.planner-tree__col-executor { width: 12rem; }
+
+/* Отступы уровней. Селектор через .planner-tree обязателен: у Bootstrap
+   padding ячеек задан составным селектором .table > * > * > *, и
+   одиночный класс его не перебивает. */
+.planner-tree td.planner-tree__level-0 { padding-left: 0.5rem; }
+.planner-tree td.planner-tree__level-1 { padding-left: 2rem; }
+.planner-tree td.planner-tree__level-2 { padding-left: 3.5rem; }
+.planner-tree td.planner-tree__level-3 { padding-left: 5rem; }
+.planner-tree td.planner-tree__level-4 { padding-left: 6.5rem; }
+
+/* Приглушение чужих строк. Через color, а не opacity: у <tr>
+   прозрачность не применяется — строка таблицы не образует контекста
+   наложения.
+
+   Селектор со звёздочкой, а не перечисление классов: в строке отдела
+   текст лежит в .fw-semibold, в строке шифра — в .planner-tree__code,
+   а часть ячеек вовсе без классов. Перечислять их пришлось бы заново
+   при каждой правке разметки. */
+.planner-tree__muted,
+.planner-tree__muted td,
+.planner-tree__muted td * {
+    color: #adb5bd;
+}
+/* Бейдж стадии оставляем читаемым: у него тёмный фон, и приглушённый
+   текст на нём сливается. */
+.planner-tree__muted td .badge.bg-secondary {
+    color: #fff;
+}
+/* Переключатель ветки. Символ живёт в разметке, а не в content: без CSS
+   он всё равно виден, и ветку можно свернуть. Стили — только поворот. */
+.planner-tree__toggle {
+    display: inline-block;
+    width: 1rem;
+    cursor: pointer;
+    user-select: none;
+    transition: transform 0.15s ease-in-out;
+}
+
+.planner-tree__toggle--collapsed {
+    transform: rotate(-90deg);
+}
+/* ================================================================
+   Загрузка бюро — календарная сетка (React-остров workload).
+   Дописать в конец app/static/css/style.css.
+
+   Bootstrap здесь не хватает в двух местах: липкие колонки при
+   горизонтальной прокрутке и цветные полосы план/факт внутри ячейки.
+   Всё остальное (таблица, кнопки, бейджи) — штатные классы.
+   ================================================================ */
+
+/* Выбор подразделения в шапке страницы. Селект по умолчанию тянется на
+   всю доступную ширину — ограничиваем, оставляя место заголовку. */
+.workload-dept-select {
+    width: auto;
+    min-width: 16rem;
+}
+
+/* Обёртка с горизонтальной прокруткой. Именно она едет, а липкие
+   колонки внутри остаются на месте. */
+.workload-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--bs-border-color);
+    border-radius: var(--bs-border-radius);
+}
+
+/* Ширина по содержимому. Bootstrap ставит таблице width: 100%, из-за
+   чего при коротком окне колонки разъезжаются, заполняя экран. Для
+   календаря это вредно: ширина колонки дня должна быть постоянной,
+   иначе две недели и три месяца выглядят по-разному. */
+.workload-grid {
+    table-layout: auto;
+    margin-bottom: 0;
+    width: auto;
+        /* Границы и тени при схлопнутых границах рисует ТАБЛИЦА, а не
+       ячейки, и линия остаётся на месте, когда липкая колонка
+       отъезжает при прокрутке. Поэтому раздельные границы: без них у
+       .workload-grid__days не видно ни рамки, ни тени. Двойных линий не
+       будет — Bootstrap задаёт ячейкам только нижнюю границу, а отступы
+       между ними обнулены. */
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+/* --- липкие колонки ------------------------------------------------ */
+
+/* Колонка с ФИО и шифром. z-index выше ячеек дней, иначе при прокрутке
+   они проедут поверх неё. */
+.workload-grid__name {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background-color: var(--bs-body-bg);
+    /* Фиксированная ширина, а не минимум: при коротком списке дней
+       браузер раздавал свободное место первой колонке, и она
+       растягивалась на треть экрана. Все три значения одинаковы —
+       так колонка не тянется и не сжимается. */
+    width: 14rem;
+    min-width: 14rem;
+    max-width: 14rem;
+    white-space: nowrap;
+    /* Длинный шифр обрезается многоточием, а не раздвигает колонку. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+
+/* Колонка «дн.». Её left равен ширине предыдущей — значения связаны,
+   поэтому обе ширины фиксированы. */
+.workload-grid__days {
+    position: sticky;
+    left: 14rem;
+    z-index: 2;
+    background-color: var(--bs-body-bg);
+    width: 3.5rem;
+    min-width: 3.5rem;
+    text-align: right;
+    white-space: nowrap;
+    border-right: 2px solid var(--bs-border-color);
+    
+}
+
+/* Заголовок таблицы липнет сверху — при вертикальной прокрутке длинного
+   бюро даты остаются видимыми. */
+.workload-grid thead th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background-color: var(--bs-body-bg);
+    vertical-align: bottom;
+}
+
+/* Пересечение липкой строки и липких колонок: нужен максимальный
+   z-index, иначе угол перекрывается одним из соседей. */
+.workload-grid thead .workload-grid__name,
+.workload-grid thead .workload-grid__days {
+    z-index: 4;
+}
+
+/* --- колонки дней -------------------------------------------------- */
+
+.workload-grid__date {
+    width: 3rem;
+    min-width: 3rem;
+    text-align: center;
+    line-height: 1.1;
+}
+
+.workload-grid__weekday {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 400;
+    color: var(--bs-secondary-color);
+}
+
+.workload-grid__daynum {
+    display: block;
+    font-size: 0.9rem;
+}
+
+.workload-grid__cell {
+    padding: 0.15rem 0.2rem;
+    vertical-align: middle;
+}
+
+/* Выходные и праздники. Приглушение фоном, а не цветом текста: ячейка
+   чаще всего пустая, красить в ней нечего. */
+.workload-grid__cell--nonwork {
+    /* Bootstrap 5.3 красит фон ячеек таблицы слоями через
+       --bs-table-bg-type: обычный background-color на td он перекрывает.
+       Поэтому задаём и переменную, и свойство. */
+    --bs-table-bg-type: var(--bs-tertiary-bg);
+    background-color: var(--bs-tertiary-bg);
+}
+
+/* --- строки -------------------------------------------------------- */
+
+.workload-grid__employee > th,
+.workload-grid__employee > td {
+    border-top: 2px solid var(--bs-border-color);
+}
+
+.workload-grid__name--set {
+    padding-left: 1.75rem;
+}
+
+.workload-marka {
+    color: var(--bs-body-color);
+    font-size: 0.85rem;
+}
+
+/* --- полосы плана и факта ------------------------------------------ */
+
+/* Блочные полосы, по одной на строку внутри ячейки: план сверху, факт
+   снизу. Пустая нижняя строка сразу показывает «запланировано, но не
+   отработано». */
+.workload-bar {
+    display: block;
+    height: 0.7rem;
+    border-radius: 0.2rem;
+}
+
+.workload-bar + .workload-bar {
+    margin-top: 0.15rem;
+}
+
+/* План — синий. */
+.workload-bar--plan {
+    background-color: #cfe2ff;
+}
+
+/* Факт по плану — зелёный: сделано то, что планировалось. */
+.workload-bar--fact {
+    background-color: #d1e7dd;
+}
+
+/* Факт вне плана — оранжевый: человек подхватил работу, на которую его
+   не планировали. Единственный случай, где отклонение помечено цветом. */
+.workload-bar--offplan {
+    background-color: #ffe5b4;
+}
+
+/* Сводная полоса в строке инженера: день занят чем-нибудь. */
+.workload-bar--busy {
+    background-color: var(--bs-secondary);
+    opacity: 0.75;
+}
+
+/* Буква табеля в день отсутствия. */
+.workload-absence {
+    display: block;
+    text-align: center;
+    font-size: 0.8rem;
+    color: var(--bs-secondary-color);
+}
+
+/* --- легенда -------------------------------------------------------- */
+
+/* Полосы в легенде инлайновые, в отличие от блочных в ячейках. */
+.workload-legend .workload-bar {
+    display: inline-block;
+    width: 1.75rem;
+    vertical-align: middle;
+    margin-right: 0.35rem;
+}
+
+/* ================================================================
+   Загрузка бюро — редактирование плана.
+   ДОПИСАТЬ в конец блока workload в app/static/css/style.css,
+   после правила .workload-legend .workload-bar
+   ================================================================ */
+
+/* Ячейка, по которой можно кликнуть. Подсветка при наведении нужна
+   именно здесь: на пустой ячейке иначе непонятно, доступна она или
+   день чем-то занят. */
+.workload-grid__cell--clickable {
+    cursor: pointer;
+}
+
+.workload-grid__cell--clickable:hover {
+    --bs-table-bg-type: var(--bs-secondary-bg);
+    background-color: var(--bs-secondary-bg);
+}
+
+/* Ячейка, которую сервер отклонил при сохранении. Держится до
+   следующего клика — пока пользователь не начал править, ему нужно
+   видеть, где именно не прошло. */
+.workload-grid__cell--rejected {
+    outline: 2px solid var(--bs-danger);
+    outline-offset: -2px;
+}
+
+/* Несохранённое добавление: пунктирная рамка без заливки. Отличие от
+   залитой полосы принципиально — это намерение, а не записанный план. */
+.workload-bar--pending {
+    border: 1px dashed var(--bs-primary);
+    background-color: transparent;
+}
+
+/* Несохранённое удаление: полоса остаётся на месте, но гаснет. Убрать
+   её совсем нельзя — иначе непонятно, что именно снимается. */
+.workload-bar--removing {
+    background-color: #cfe2ff;
+    opacity: 0.35;
+}
+
+/* В легенде пунктирный образец должен быть виден на светлом фоне:
+   inline-block из общего правила высоту не задаёт. */
+.workload-legend .workload-bar--pending {
+    height: 0.7rem;
+}
+
+/* ================================================================
+   Загрузка бюро — ориентиры на длинной ленте.
+   Дописать в конец блока workload в app/static/css/style.css.
+   ================================================================ */
+
+/* Высота ленты. При окне в три месяца таблица длинная по горизонтали,
+   но короткая по вертикали — ограничение нужно, только если бюро
+   большое; иначе прокручивалась бы вся страница вместе с шапкой. */
+.workload-scroll {
+    max-height: calc(100vh - 16rem);
+    overflow-y: auto;
+}
+
+/* Разделитель первого числа месяца. Линия проходит через всю высоту
+   таблицы, поэтому граница ставится и заголовку, и ячейкам: на ленте в
+   90 дней это единственный способ понять, где кончился один месяц. */
+.workload-grid__date--month-start,
+.workload-grid__cell--month-start {
+    border-left: 2px solid var(--bs-border-color);
+}
+
+/* Имя месяца в заголовке первого числа — вместо дня недели. Выделено
+   начертанием, чтобы находиться взглядом при быстрой прокрутке. */
+.workload-grid__month {
+    display: block;
+    font-size: 0.62rem;
+    font-weight: 600;
+    color: var(--bs-emphasis-color);
+    text-transform: uppercase;
+}
+
+/* Текущий день — опорная точка ленты. Подсветка слабая: колонка должна
+   находиться взглядом, но не спорить с полосами плана и факта. */
+.workload-grid__date--today .workload-grid__daynum {
+    font-weight: 700;
+    color: var(--bs-primary);
+}
+
+.workload-grid__cell--today,
+.workload-grid__date--today {
+    --bs-table-bg-type: rgba(13, 110, 253, 0.06);
+    background-color: rgba(13, 110, 253, 0.06);
+}
+
+
+/* ================================================================
+   Каркас раздела: фиксированный сайдбар + содержимое на остаток.
+   Дописать в app/static/css/style.css рядом с .section-sidebar.
+   ================================================================ */
+
+/* Зазор между меню и содержимым. Заодно задаёт вертикальный отступ,
+   когда ниже lg панель встаёт над содержимым. */
+.section-layout {
+    gap: 1.5rem;
+}
+
+/* Левая панель. Ширина в пикселях, а не долей экрана: навигация
+   приложения должна стоять на одном месте независимо от монитора и от
+   того, какой раздел открыт. flex: 0 0 auto запрещает и растягивание,
+   и сжатие. */
+.section-sidebar-col {
+    flex: 0 0 auto;
+    width: 190px;
+}
+
+/* Ниже lg панель встаёт над содержимым и занимает всю ширину —
+   фиксированные 190px там были бы бессмысленны. */
+@media (max-width: 991.98px) {
+    .section-sidebar-col {
+        width: 100%;
+    }
+}
+
+/* Содержимое занимает остаток.
+
+   min-width: 0 — ключевая строка. По умолчанию flex-элемент не
+   сжимается уже своего содержимого (min-width: auto), поэтому широкая
+   таблица внутри растянула бы раскладку и вытолкнула сайдбар за край
+   экрана. С нулевым минимумом элемент сжимается, а таблица показывает
+   собственную горизонтальную прокрутку — то, что и нужно сетке
+   загрузки.
+
+   overflow-x: hidden страхует от того же на случай, если внутри
+   окажется блок без своей прокрутки. */
+.section-content {
+    min-width: 0;
+    overflow-x: hidden;
+}

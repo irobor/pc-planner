@@ -1,0 +1,38 @@
+{% extends "layouts/app.html" %}
+
+{% block title %}Создание состава проекта{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+
+    {# Шапка: возврат к списку составов + общий заголовок (проект ещё #}
+    {# не выбран, конкретного шифра в заголовке нет — решение B2-Q4). #}
+    <div class="mb-3">
+      <a href="/project-composition"
+         class="btn btn-outline-secondary btn-sm mb-2">
+        &larr; К списку составов
+      </a>
+      <h1 class="h3 mb-0">Создание состава проекта</h1>
+      <p class="text-muted mb-0">Введите шифр проекта</p>
+    </div>
+
+    {# Монтажный узел React (composition-create.bundle.js). Без          #}
+    {# data-project-id (решение B2-Q1): проект ещё не выбран, id появится #}
+    {# в React после ввода шифра и выбора из автодополнения. Свой id     #}
+    {# composition-create-root — отличает эту точку монтирования от       #}
+    {# редактора (composition-root). Заглушка — на время загрузки бандла. #}
+    <div id="composition-create-root">
+      <div class="text-muted py-4">Загрузка…</div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{# Отдельный бандл страницы создания (vite.config.js, вход              #}
+{# composition-create) — не путать с composition.bundle.js (редактор).  #}
+{# type="module" обязателен: бандлы импортируют общий чанк client.js.    #}
+{% block extra_js %}
+<script type="module" src="/static/js/composition-create.bundle.js"></script>
+{% endblock %}

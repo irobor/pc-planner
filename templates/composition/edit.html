@@ -1,0 +1,40 @@
+{% extends "layouts/app.html" %}
+
+{% block title %}Редактирование состава {{ project.code }}{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+
+    {# Шапка по образцу tree.html: возврат к дереву + заголовок проекта. #}
+    <div class="mb-3">
+      <a href="/project-composition/{{ project.id }}"
+         class="btn btn-outline-secondary btn-sm mb-2">
+        &larr; К дереву состава
+      </a>
+      <h1 class="h3 mb-0">
+        Редактирование состава {{ project.code }}
+      </h1>
+      <p class="text-muted mb-0">{{ project.title }}</p>
+    </div>
+
+    {# Монтажный узел React-корзины (composition.bundle.js).             #}
+    {# data-project-id — способ прокинуть id проекта в React-остров      #}
+    {# (решение E2): компонент читает его как rootNode.dataset.projectId #}
+    {# и по нему грузит состав через /api/composition/{id}.              #}
+    {# Содержимое внутри — заглушка (решение T1): показывается, пока     #}
+    {# грузится бандл и монтируется React. При render() React заменит    #}
+    {# содержимое узла целиком, и заглушка исчезнет автоматически.       #}
+    <div id="composition-root" data-project-id="{{ project.id }}">
+      <div class="text-muted py-4">Загрузка редактора…</div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{# React-бандл корзины. Отдельная точка входа composition.bundle.js     #}
+{# (vite.config.js, вход composition) — не путать с planner.bundle.js.  #}
+{% block extra_js %}
+<script type="module" src="/static/js/composition.bundle.js"></script>
+{% endblock %}

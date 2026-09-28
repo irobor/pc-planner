@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}Вход в систему{% endblock %}
+
+{# Без навбара и футера: фон + центрирование карточки. #}
+{% block body_class %}bg-light{% endblock %}
+
+{% block body %}
+<div class="container">
+  <div class="row justify-content-center align-items-center min-vh-100">
+    <div class="col-md-5 col-lg-4">
+      <div class="card shadow-sm">
+        <div class="card-body p-4">
+          <h1 class="h4 card-title text-center mb-4">Вход в систему</h1>
+
+          {% if error %}
+          <div class="alert alert-danger" role="alert">{{ error }}</div>
+          {% endif %}
+
+          <form method="post" action="/login">
+            {# next переживает POST: сервер вернёт на исходную страницу.
+               Значение уже провалидировано в login_page. #}
+            <input type="hidden" name="next" value="{{ next_url or '' }}">
+
+            <div class="mb-3">
+              <label for="username" class="form-label">Имя пользователя</label>
+              <input type="text" class="form-control" id="username"
+                     name="username" required autofocus>
+            </div>
+            <div class="mb-3">
+              <label for="password" class="form-label">Пароль</label>
+              <input type="password" class="form-control" id="password"
+                     name="password" required>
+            </div>
+            <button type="submit" class="btn btn-primary w-100">Войти</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{# Сюда позже подключишь индивидуальный скрипт страницы входа. #}
+{% block extra_js %}
+{# <script src="/static/js/login.js"></script> #}
+{% endblock %}

@@ -1,0 +1,107 @@
+{# app/templates/layouts/app.html #}
+{% extends "base.html" %}
+
+{# Оболочка основного приложения: верхний ярус навигации + футер.
+   Наследуется всеми рабочими страницами.
+
+   Навигация двухъярусная:
+     ярус 1 (здесь)         — РАЗДЕЛЫ приложения: Главная, Состав,
+                              Планировщик, Администрирование;
+     ярус 2 (section.html)  — ЭКРАНЫ внутри раздела, боковой панелью.
+   Раздел с единственным экраном второй ярус не рисует — прятать нечего. #}
+
+{# Прижатый футер: флекс-колонка на всю высоту вьюпорта. #}
+{% block body_class %}bg-light d-flex flex-column min-vh-100{% endblock %}
+
+{# Активный раздел определяется по ПЕРВОМУ сегменту пути, а не по полному
+   совпадению: внутри раздела адрес меняется (/planner/works,
+   /planner/workload), а подсветка должна оставаться на «Планировщике».
+   Пустая строка для «/» — иначе главная совпала бы с любым разделом. #}
+{% set section = request.url.path.split('/')[1] if request.url.path != '/' else '' %}
+
+{% block body %}
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+        <div class="container">
+            <a class="navbar-brand" href="/">УОЛМ</a>
+            <button class="navbar-toggler" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#navbarNav"
+                    aria-controls="navbarNav" aria-expanded="false"
+                    aria-label="Показать меню">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+
+            <div class="collapse navbar-collapse" id="navbarNav">
+                {# Разделы. Каждый под своим правом: пункт, ведущий на 403,
+                   показывать нельзя. Проверка через инъектор can() — тот же
+                   User.can(), что и на сервере, поэтому меню и бэкенд судят
+                   по одному правилу. #}
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link{% if section == '' %} active{% endif %}"
+                           href="/">Главная</a>
+                    </li>
+
+                    {% if can("composition:view") %}
+                    <li class="nav-item">
+                        <a class="nav-link{% if section == 'project-composition' %} active{% endif %}"
+                           href="/project-composition">Состав проектов</a>
+                    </li>
+                    {% endif %}
+
+                    {# Планировщик — под правом просмотра плана. Начальники
+                       и инженеры его имеют, табельщица и registry_editor — нет. #}
+                    {% if can("plan:view") %}
+                    <li class="nav-item">
+                        <a class="nav-link{% if section == 'planner' %} active{% endif %}"
+                           href="/planner/works">Планировщик</a>
+                    </li>
+                    {% endif %}
+
+                    {# Администрирование — только суперпользователю. Отдельного
+                       права под раздел в permissions нет: заводить его под
+                       страницу-заглушку преждевременно, поэтому проверяем
+                       роль напрямую. Заменить на can(), когда появится
+                       содержимое и станет ясно, кому ещё нужен доступ. #}
+                    {% if user.is_superuser %}
+                    <li class="nav-item">
+                        <a class="nav-link{% if section == 'admin' %} active{% endif %}"
+                           href="/admin">Администрирование</a>
+                    </li>
+                    {% endif %}
+                </ul>
+
+                {# Пользователь и выход. display_name — фасад над разделённой
+                   идентичностью: ФИО работника, а для служебных учёток логин. #}
+                <ul class="navbar-nav ms-auto align-items-lg-center">
+                    <li class="nav-item">
+                        <span class="navbar-text me-3">{{ user.display_name }}</span>
+                    </li>
+                    <li class="nav-item">
+                        {# logout — действие с побочным эффектом, поэтому POST,
+                           а не ссылка. #}
+                        <form method="post" action="/logout" class="d-inline">
+                            <button type="submit" class="btn btn-outline-light btn-sm">
+                                Выход
+                            </button>
+                        </form>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    {# flex-grow-1 растягивает контент и прижимает футер к низу. #}
+    {# flex-grow-1 растягивает контент и прижимает футер к низу.
+       Ширина одна на всё приложение: каркас с постоянной левой
+       навигацией не должен менять габариты при переходе между
+       экранами. px-4 задаёт одинаковые поля по краям. #}
+    <main class="container-fluid flex-grow-1 px-4">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="bg-dark text-white text-center py-3 mt-4">
+        <div class="container">
+            <small>&copy; 2026 Сервис планирования</small>
+        </div>
+    </footer>
+{% endblock %}

@@ -1,0 +1,134 @@
+{# app/templates/planner/_tree_table.html #}
+{# ------------------------------------------------------------------ #}
+{# Дерево состава в виде ТАБЛИЦЫ — разметка экрана «Работы бюро».      #}
+{#                                                                     #}
+{# Отдельный макрос, а не флаг в composition/_tree_macro.html: экраны  #}
+{# разошлись по существу. Составу нужен обзор структуры, планировщику  #}
+{# — колонки данных и кликабельные строки шифров. Общей осталась       #}
+{# СТРУКТУРА (build_composition_tree), а вёрстка у каждого своя.       #}
+{#                                                                     #}
+{# Иерархия внутри таблицы: отступ задаётся классом по уровню          #}
+{# вложенности (level), а не вложенными <ul> — иначе колонки не        #}
+{# выровнялись бы по вертикали.                                        #}
+{#                                                                     #}
+{# Сворачивание — скриптом, не Bootstrap-collapse: тот прячет ОДИН     #}
+{# контейнер, а здесь нужно спрятать группу <tr> на произвольной       #}
+{# глубине. Каждая строка несёт data-path — путь предков вида          #}
+{# «/17/1/5/», по которому скрипт находит потомков сворачиваемого узла.#}
+{# ------------------------------------------------------------------ #}
+
+{% macro render_dept_rows(node, manageable_ids, expanded_ids, can_create,
+                          level=0, path="", hidden=False) %}
+{% set is_mine = node.department.id in manageable_ids %}
+{# Раскрыта ли ветка при загрузке: свои и путь к ним — да, чужие — нет. #}
+{% set is_open = node.department.id in expanded_ids %}
+{# Путь этого узла. Разделители по краям обязательны: без них поиск
+   подстроки «/5/» нашёл бы и «/15/». #}
+{% set node_path = path ~ node.department.id ~ "/" %}
+{# Потомки скрыты, если скрыт сам узел ИЛИ его ветка свёрнута. #}
+{% set child_hidden = hidden or not is_open %}
+
+{# Строка отдела. Чужой приглушается — но только он сам: внутри чужого
+   отдела может лежать СВОЁ бюро, и гасить его нельзя. #}
+<tr class="{% if not is_mine %}planner-tree__muted{% endif %}"
+    data-path="{{ path }}"{% if hidden %} hidden{% endif %}>
+  <td class="planner-tree__name planner-tree__level-{{ level }}">
+    {# Переключатель — только у узлов, которым есть что прятать. #}
+    {% if node.markas or node.children %}
+    <span class="planner-tree__toggle{% if not is_open %} planner-tree__toggle--collapsed{% endif %}"
+          data-target-path="{{ node_path }}"
+          role="button" tabindex="0"
+          aria-expanded="{{ 'true' if is_open else 'false' }}">&#9662;</span>
+    {% endif %}
+    <span class="fw-semibold">{{ node.department.code }}</span>
+    <span class="text-muted">— {{ node.department.name }}</span>
+    {% if not is_mine %}
+    <span class="badge bg-light text-secondary border">только просмотр</span>
+    {% endif %}
+  </td>
+  <td class="text-end"></td>
+  <td></td>
+  <td></td>
+</tr>
+
+{# Марки этого отдела. У промежуточного отдела-родителя markas пуст. #}
+{% for marka in node.markas %}
+<tr class="{% if not is_mine %}planner-tree__muted{% endif %}"
+    data-path="{{ node_path }}"{% if child_hidden %} hidden{% endif %}>
+  <td class="planner-tree__name planner-tree__level-{{ level + 1 }}">
+    <span class="fw-medium">{{ marka.marka_type.code }}</span>
+    <span class="text-muted">{{ marka.marka_type.name }}</span>
+    <span class="badge bg-secondary">{{ marka.stage.stage_name }}</span>
+    {% if can_create and is_mine %}
+    <button type="button"
+            class="btn btn-outline-primary btn-sm ms-2"
+            data-bs-toggle="modal"
+            data-bs-target="#createSetModal"
+            data-composition-id="{{ marka.composition_id }}"
+            data-department-id="{{ node.department.id }}">
+      + Шифр
+    </button>
+    {% endif %}
+  </td>
+  <td class="text-end"></td>
+  <td></td>
+  <td></td>
+</tr>
+
+  {# Шифры под маркой. Строка кликабельна целиком — открывает карточку.
+     Кнопки «править» нет намеренно: шифров у бюро набирается десяток,
+     и столько же кнопок превратили бы дерево в частокол.
+
+     Следствие: внутри строки НЕ должно быть других кликабельных
+     элементов. Бейдж адресата — часть строки, а не ссылка на марку
+     получателя. #}
+  {% for set_item in marka.sets %}
+  <tr class="{% if not is_mine %}planner-tree__muted{% endif %}{% if is_mine and can_create %} planner-tree__set-row{% endif %}"
+      data-path="{{ node_path }}"{% if child_hidden %} hidden{% endif %}
+      {% if is_mine and can_create %}
+      data-bs-toggle="modal"
+      data-bs-target="#editSetModal"
+      data-set-id="{{ set_item.id }}"
+      data-marka-full="{{ set_item.marka_full }}"
+      data-executor-id="{{ set_item.id_executor or '' }}"
+      data-executor-name="{{ set_item.executor.full_name if set_item.executor else '' }}"
+      data-status-id="{{ set_item.status_id }}"
+      data-recipient-id="{{ set_item.recipient_composition_id or '' }}"
+      data-department-id="{{ node.department.id }}"
+      data-marka-label="{{ marka.marka_type.code }} — {{ node.department.name }}"
+      {% endif %}>
+    <td class="planner-tree__name planner-tree__level-{{ level + 2 }}">
+      <span class="planner-tree__code">{{ set_item.marka_full }}</span>
+      {% if set_item.recipient_composition_id %}
+      <span class="badge bg-primary-subtle text-primary-emphasis">
+        &rarr; задание
+      </span>
+      {% endif %}
+    </td>
+    {# Колонки плана. work_plan ещё не реализован — прочерк показывает,
+       что шифр заведён, но не спланирован. Это рабочее состояние: мы
+       развели назначение исполнителя и планирование. #}
+    <td class="text-end text-muted">—</td>
+    <td class="text-muted">не спланирован</td>
+    <td>{{ set_item.executor.full_name if set_item.executor else "" }}</td>
+  </tr>
+  {% endfor %}
+
+  {# Марка без шифров — состояние до заведения комплекта. #}
+  {% if not marka.sets %}
+  <tr class="{% if not is_mine %}planner-tree__muted{% endif %}"
+      data-path="{{ node_path }}"{% if child_hidden %} hidden{% endif %}>
+    <td class="planner-tree__name planner-tree__level-{{ level + 2 }}">
+      <span class="text-muted fst-italic">Шифр не заведён</span>
+    </td>
+    <td></td><td></td><td></td>
+  </tr>
+  {% endif %}
+{% endfor %}
+
+{# Дочерние отделы — рекурсия с накоплением пути и уровня отступа. #}
+{% for child in node.children %}
+{{ render_dept_rows(child, manageable_ids, expanded_ids, can_create,
+                    level + 1, node_path, child_hidden) }}
+{% endfor %}
+{% endmacro %}

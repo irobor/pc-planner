@@ -1,0 +1,526 @@
+{% extends "layouts/section.html" %}
+{% import "planner/_tree_table.html" as tree_table %}
+
+{% block title %}Работы бюро — {{ project.code }}{% endblock %}
+
+
+{% block sidebar %}
+  {{ nav_item("/planner/works", "Работы") }}
+  {{ nav_item("/planner/workload", "Загрузка") }}
+  {{ nav_item("/planner/employees", "Сотрудники") }}
+{% endblock %}
+
+{% block section_content %}
+
+
+{# Ошибки создания приходят кодом в строке запроса: роут делает редирект
+   на 303, чтобы обновление страницы не повторяло отправку формы, а текст
+   собирается здесь — так его не приходится экранировать в URL. #}
+{% if request.query_params.get("error") %}
+{% set error_code = request.query_params.get("error") %}
+<div class="alert alert-danger alert-dismissible" role="alert">
+  {% if error_code == "duplicate" %}
+    Шифр с таким обозначением уже существует.
+  {% elif error_code == "empty" %}
+    Шифр не может быть пустым.
+  {% elif error_code == "self" %}
+    Задание нельзя адресовать самому себе.
+  {% elif error_code == "recipient" %}
+    Адресат не найден в составе этого проекта.
+  {% elif error_code == "executor" %}
+    Исполнитель не числится в подразделении этой марки.
+  {% elif error_code == "status" %}
+    Указан неизвестный статус.
+  {% else %}
+    Не удалось создать шифр.
+  {% endif %}
+  <button type="button" class="btn-close" data-bs-dismiss="alert"
+          aria-label="Закрыть"></button>
+</div>
+{% endif %}
+
+
+<h1 class="h4 mb-3">Работы бюро</h1>
+
+{# Панель фильтров. Форма GET: выбор состава и статуса уходит в строку
+   запроса, поэтому состояние экрана видно в адресе и им можно
+   поделиться. Пока обычный select — автодополнение по шифру появится,
+   когда составов у бюро станет много. #}
+<form method="get" action="/planner/works" class="row g-2 align-items-center mb-3">
+  <div class="col-auto">
+    <select name="project" class="form-select form-select-sm"
+            onchange="this.form.submit()">
+      {% for p in projects %}
+      <option value="{{ p.id }}" {% if p.id == project.id %}selected{% endif %}>
+        {{ p.code }} — {{ p.title }}
+      </option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <select name="status" class="form-select form-select-sm"
+            onchange="this.form.submit()">
+      <option value="active" {% if status_key == 'active' %}selected{% endif %}>
+        В работе
+      </option>
+      <option value="done" {% if status_key == 'done' %}selected{% endif %}>
+        В работе и выполненные
+      </option>
+      <option value="all" {% if status_key == 'all' %}selected{% endif %}>
+        Все
+      </option>
+    </select>
+  </div>
+</form>
+
+<h2 class="h6 text-muted mb-3">{{ project.code }} — {{ project.title }}</h2>
+
+{# Дерево в таблице: иерархия в первой колонке отступами, данные шифра
+   в остальных. Списками колонки не выровнять — отступ вложенного <ul>
+   сдвигал бы и данные тоже. #}
+<table class="table table-sm align-middle planner-tree">
+  <thead>
+    <tr>
+      <th>Шифр</th>
+      <th class="text-end planner-tree__col-days">Дни</th>
+      <th class="planner-tree__col-term">Срок</th>
+      <th class="planner-tree__col-executor">Исполнитель</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for root in tree %}
+        {{ tree_table.render_dept_rows(root, manageable_ids, expanded_ids, can_manage_sets) }}
+    {% endfor %}
+  </tbody>
+</table>
+
+
+{# ------------------------------------------------------------------ #}
+{# Модалка заведения шифра. ОДНА на всю страницу, а не по одной на     #}
+{# каждую марку: composition_id подставляется при открытии из data-*   #}
+{# атрибутов нажатой кнопки. Иначе на дереве из десяти марок было бы   #}
+{# десять одинаковых форм.                                            #}
+{#                                                                     #}
+{# Рисуется только при праве set:manage — иначе открывать её некому.   #}
+{# ------------------------------------------------------------------ #}
+{% if can_manage_sets %}
+<div class="modal fade" id="createSetModal" tabindex="-1"
+     aria-labelledby="createSetModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <form method="post" action="/planner/works/{{ project.id }}/sets">
+      <div class="modal-content">
+
+        <div class="modal-header">
+          <h5 class="modal-title" id="createSetModalLabel">Новый шифр</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"
+                  aria-label="Закрыть"></button>
+        </div>
+
+        <div class="modal-body">
+          {# Строка состава, под которой заводится шифр. Заполняется
+             скриптом при открытии; сервер проверяет её заново. #}
+          <input type="hidden" name="composition_id" id="setCompositionId">
+
+          <div class="mb-3">
+            <label for="setMarkaFull" class="form-label">Шифр</label>
+            {# Ввод ручной: автосборка отвергнута. Марка не определяется
+               кодом однозначно (ТР — это и marka_type 25, и 81), поэтому
+               собрать шифр из справочников нельзя. #}
+            <input type="text" class="form-control" id="setMarkaFull"
+                   name="marka_full" required maxlength="255"
+                   placeholder="053-22-14а-ЭМ">
+            <div class="form-text">
+              Шифр должен быть уникальным во всей системе.
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label for="setExecutor" class="form-label">
+              Исполнитель <span class="text-muted">— необязательно</span>
+            </label>
+            {# Назначение отделено от планирования: шифр может висеть
+               без исполнителя, пока начальник не решит, кому отдать.
+               Скрипт оставляет в списке только сотрудников того бюро,
+               которому принадлежит марка. #}
+            <select class="form-select" id="setExecutor" name="id_executor">
+              <option value="">— не назначен —</option>
+              {% for executor in executors %}
+              <option value="{{ executor.id }}"
+                      data-department-id="{{ executor.department_id }}">
+                {{ executor.full_name }}
+              </option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div class="form-check mb-3">
+            {# Задание — тот же комплект, у которого заполнен адресат.
+               Отдельной сущности нет, поэтому и отдельной формы нет:
+               галочка открывает одно дополнительное поле. #}
+            <input class="form-check-input" type="checkbox" id="setIsTask">
+            <label class="form-check-label" for="setIsTask">
+              Это задание смежному отделу
+            </label>
+          </div>
+
+          {# Поле адресата скрыто, пока галочка не поставлена. Скрипт же
+             очищает его при снятии галочки — иначе на сервер ушёл бы
+             адресат от передумавшего пользователя. #}
+          <div class="mb-3 d-none" id="setRecipientWrap">
+            <label for="setRecipient" class="form-label">Кому адресовано</label>
+            <select class="form-select" id="setRecipient"
+                    name="recipient_composition_id">
+              <option value="">— выберите марку —</option>
+              {% for recipient in recipients %}
+              <option value="{{ recipient.id }}">{{ recipient.label }}</option>
+              {% endfor %}
+            </select>
+            <div class="form-text">
+              Строка состава этого же проекта, включая чужие бюро.
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary"
+                  data-bs-dismiss="modal">Отмена</button>
+          <button type="submit" class="btn btn-primary">Создать</button>
+        </div>
+
+      </div>
+    </form>
+  </div>
+</div>
+
+{# ------------------------------------------------------------------ #}
+{# Карточка шифра. Открывается кликом по строке — кнопки «править» нет #}
+{# намеренно: шифров у бюро десяток, и столько же кнопок превратили бы #}
+{# дерево в частокол.                                                  #}
+{#                                                                     #}
+{# Исполнитель по умолчанию НЕ редактируется: он показан текстом, а    #}
+{# поле формы появляется только по кнопке «Сменить». Это защита от     #}
+{# тихой порчи данных — исполнитель шифра может быть уволен, и тогда   #}
+{# его нет в списке живых сотрудников. Открыв карточку ради статуса и  #}
+{# сохранив, начальник обнулил бы исполнителя, не заметив этого.       #}
+{# ------------------------------------------------------------------ #}
+<div class="modal fade" id="editSetModal" tabindex="-1"
+     aria-labelledby="editSetModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <form method="post" id="editSetForm">
+      <div class="modal-content">
+
+        <div class="modal-header">
+          <h5 class="modal-title" id="editSetModalLabel">Шифр</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"
+                  aria-label="Закрыть"></button>
+        </div>
+
+        <div class="modal-body">
+          {# Марка и бюро — справочно. Перенос шифра под другую марку в
+             карточке не делается: это другая операция с другими
+             последствиями. #}
+          <p class="text-muted small mb-3" id="editSetMarka"></p>
+
+          <div class="mb-3">
+            <label for="editMarkaFull" class="form-label">Шифр</label>
+            <input type="text" class="form-control" id="editMarkaFull"
+                   name="marka_full" required maxlength="255">
+            <div class="form-text">
+              Шифр должен быть уникальным во всей системе.
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label d-block">Исполнитель</label>
+            {# Текущее значение текстом. Поле формы здесь отсутствует —
+               пока не нажата «Сменить», id_executor не отправляется, и
+               сервер значение не трогает. #}
+            <div id="editExecutorView">
+              <span id="editExecutorName" class="me-2"></span>
+              <button type="button" class="btn btn-outline-secondary btn-sm"
+                      id="editExecutorChange">Сменить</button>
+            </div>
+            {# Список живых сотрудников бюро. Появляется по кнопке;
+               скрипт фильтрует его по отделу марки. #}
+            <select class="form-select d-none" id="editExecutorSelect"
+                    name="id_executor">
+              <option value="">— не назначен —</option>
+              {% for executor in executors %}
+              <option value="{{ executor.id }}"
+                      data-department-id="{{ executor.department_id }}">
+                {{ executor.full_name }}
+              </option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div class="mb-3">
+            <label for="editStatus" class="form-label">Статус</label>
+            {# Порядок статусов свободный: они пока ни на что не влияют,
+               а ограничение переходов мешало бы исправлять ошибки. #}
+            <select class="form-select" id="editStatus" name="status_id">
+              {% for st in set_statuses %}
+              <option value="{{ st.id }}">{{ st.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div class="form-check mb-3">
+            {# Снятие галочки превращает задание в обычный комплект,
+               установка — наоборот. Отдельной сущности нет, тип шифра
+               определяется наличием адресата. #}
+            <input class="form-check-input" type="checkbox" id="editIsTask">
+            <label class="form-check-label" for="editIsTask">
+              Это задание смежному отделу
+            </label>
+          </div>
+
+          <div class="mb-3 d-none" id="editRecipientWrap">
+            <label for="editRecipient" class="form-label">Кому адресовано</label>
+            <select class="form-select" id="editRecipient"
+                    name="recipient_composition_id">
+              <option value="">— выберите марку —</option>
+              {% for recipient in recipients %}
+              <option value="{{ recipient.id }}">{{ recipient.label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+
+          {# План — справочно. work_plan ещё не реализован. #}
+          <div class="border-top pt-3">
+            <span class="text-muted small">План: не спланирован</span>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary"
+                  data-bs-dismiss="modal">Отмена</button>
+          <button type="submit" class="btn btn-primary">Сохранить</button>
+        </div>
+
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Подготовка модалки заведения шифра.
+//
+// Модалка одна на страницу, поэтому перед показом её нужно настроить под
+// конкретную нажатую кнопку: подставить строку состава и отфильтровать
+// список исполнителей по бюро этой марки.
+document.addEventListener('DOMContentLoaded', function () {
+    const modal = document.getElementById('createSetModal');
+    // Права set:manage нет — модалка не отрисована, настраивать нечего.
+    if (!modal) {
+        return;
+    }
+
+    const compositionInput = document.getElementById('setCompositionId');
+    const executorSelect = document.getElementById('setExecutor');
+    const isTaskCheckbox = document.getElementById('setIsTask');
+    const recipientWrap = document.getElementById('setRecipientWrap');
+    const recipientSelect = document.getElementById('setRecipient');
+    const markaFullInput = document.getElementById('setMarkaFull');
+
+    // Bootstrap отдаёт нажавшую кнопку в event.relatedTarget — оттуда
+    // берём и строку состава, и отдел для фильтра исполнителей.
+    modal.addEventListener('show.bs.modal', function (event) {
+        const trigger = event.relatedTarget;
+        if (!trigger) {
+            return;
+        }
+
+        const compositionId = trigger.dataset.compositionId;
+        const departmentId = trigger.dataset.departmentId;
+
+        compositionInput.value = compositionId;
+
+        // Форма переиспользуется: чистим значения от прошлого открытия,
+        // иначе пользователь увидит чужой шифр и чужого исполнителя.
+        markaFullInput.value = '';
+        isTaskCheckbox.checked = false;
+        recipientWrap.classList.add('d-none');
+        recipientSelect.value = '';
+
+        // Исполнитель обязан числиться в бюро этой марки — сервер это
+        // проверяет. Прячем неподходящих, чтобы выбор был невозможен, а
+        // не отвергался после отправки.
+        Array.from(executorSelect.options).forEach(function (option) {
+            // Пустой option («не назначен») атрибута не имеет и виден всегда.
+            if (!option.dataset.departmentId) {
+                option.hidden = false;
+                return;
+            }
+            option.hidden = option.dataset.departmentId !== departmentId;
+        });
+        executorSelect.value = '';
+    });
+
+    // Галочка «это задание» открывает поле адресата. При снятии значение
+    // сбрасывается: иначе на сервер ушёл бы адресат от передумавшего
+    // пользователя, и комплект молча стал бы заданием.
+    isTaskCheckbox.addEventListener('change', function () {
+        if (isTaskCheckbox.checked) {
+            recipientWrap.classList.remove('d-none');
+        } else {
+            recipientWrap.classList.add('d-none');
+            recipientSelect.value = '';
+        }
+    });
+});
+</script>
+<script>
+// Сворачивание веток дерева работ.
+//
+// Bootstrap collapse здесь неприменим: он прячет ОДИН контейнер, а нужно
+// спрятать группу <tr> на произвольной глубине. Поэтому строки помечены
+// путём предков (data-path вида «/17/1/5/»), и переключатель прячет все
+// строки, чей путь начинается с пути его узла.
+document.addEventListener('DOMContentLoaded', function () {
+    const table = document.querySelector('.planner-tree');
+    if (!table) {
+        return;
+    }
+
+    function toggleBranch(toggle) {
+        const targetPath = toggle.dataset.targetPath;
+        const expanded = toggle.getAttribute('aria-expanded') === 'true';
+
+        toggle.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+        toggle.classList.toggle('planner-tree__toggle--collapsed', expanded);
+
+        // Прячем всё поддерево. Вложенные переключатели не трогаем:
+        // развернув родителя обратно, пользователь увидит ветку в том
+        // состоянии, в каком её оставил.
+        table.querySelectorAll('tr[data-path]').forEach(function (row) {
+            if (row.dataset.path.startsWith(targetPath)) {
+                row.hidden = expanded;
+            }
+        });
+    }
+
+    // Делегирование: один обработчик на таблицу, а не по одному на узел.
+    table.addEventListener('click', function (event) {
+        const toggle = event.target.closest('.planner-tree__toggle');
+        if (!toggle) {
+            return;
+        }
+        // Строка шифра тоже кликабельна (открывает карточку) — клик по
+        // треугольнику не должен всплыть до неё.
+        event.stopPropagation();
+        toggleBranch(toggle);
+    });
+
+    // Клавиатура: переключатель объявлен role="button", значит обязан
+    // реагировать на Enter и пробел.
+    table.addEventListener('keydown', function (event) {
+        if (event.key !== 'Enter' && event.key !== ' ') {
+            return;
+        }
+        const toggle = event.target.closest('.planner-tree__toggle');
+        if (!toggle) {
+            return;
+        }
+        event.preventDefault();
+        toggleBranch(toggle);
+    });
+});
+</script>
+
+<script>
+// Заполнение карточки шифра.
+//
+// Данные берутся из data-атрибутов строки: полей четыре, и отдельная
+// ручка за ними была бы избыточна. Если полей станет заметно больше —
+// перейти на запрос по set_id.
+document.addEventListener('DOMContentLoaded', function () {
+    const modal = document.getElementById('editSetModal');
+    if (!modal) {
+        return;
+    }
+
+    const form = document.getElementById('editSetForm');
+    const markaText = document.getElementById('editSetMarka');
+    const markaFull = document.getElementById('editMarkaFull');
+    const executorView = document.getElementById('editExecutorView');
+    const executorName = document.getElementById('editExecutorName');
+    const executorChange = document.getElementById('editExecutorChange');
+    const executorSelect = document.getElementById('editExecutorSelect');
+    const statusSelect = document.getElementById('editStatus');
+    const isTask = document.getElementById('editIsTask');
+    const recipientWrap = document.getElementById('editRecipientWrap');
+    const recipientSelect = document.getElementById('editRecipient');
+
+    modal.addEventListener('show.bs.modal', function (event) {
+        const row = event.relatedTarget;
+        if (!row) {
+            return;
+        }
+
+        const data = row.dataset;
+
+        // Адрес сохранения собирается из id шифра: одна форма на все
+        // строки, поэтому action проставляется при открытии.
+        form.action = '{{ "/planner/works/" ~ project.id ~ "/sets/" }}'
+            + data.setId;
+
+        markaText.textContent = data.markaLabel;
+        markaFull.value = data.markaFull;
+        statusSelect.value = data.statusId;
+
+        // Исполнитель показан текстом; поле формы скрыто и потому НЕ
+        // отправляется. Сервер трактует отсутствие поля как «не менять».
+        executorName.textContent = data.executorName || 'не назначен';
+        executorView.classList.remove('d-none');
+        executorSelect.classList.add('d-none');
+        // disabled снимает поле с отправки надёжнее, чем d-none: скрытый
+        // select всё равно попал бы в тело запроса.
+        executorSelect.disabled = true;
+
+        // В списке только сотрудники бюро этой марки. Уволенного
+        // исполнителя среди них нет — назначить его заново нельзя.
+        Array.from(executorSelect.options).forEach(function (option) {
+            if (!option.dataset.departmentId) {
+                option.hidden = false;
+                return;
+            }
+            option.hidden = option.dataset.departmentId !== data.departmentId;
+        });
+        executorSelect.value = data.executorId || '';
+
+        // Тип шифра: адресат заполнен — значит задание.
+        const hasRecipient = Boolean(data.recipientId);
+        isTask.checked = hasRecipient;
+        recipientSelect.value = data.recipientId || '';
+        recipientWrap.classList.toggle('d-none', !hasRecipient);
+    });
+
+    // «Сменить» заменяет текст полем выбора. Обратной кнопки нет: раз
+    // начальник нажал, он собирается менять, а отказаться можно кнопкой
+    // «Отмена» внизу карточки.
+    executorChange.addEventListener('click', function () {
+        executorView.classList.add('d-none');
+        executorSelect.classList.remove('d-none');
+        executorSelect.disabled = false;
+    });
+
+    isTask.addEventListener('change', function () {
+        if (isTask.checked) {
+            recipientWrap.classList.remove('d-none');
+        } else {
+            recipientWrap.classList.add('d-none');
+            // Значение сбрасывается: иначе адресат от передумавшего
+            // пользователя ушёл бы на сервер, и комплект остался бы
+            // заданием вопреки снятой галочке.
+            recipientSelect.value = '';
+        }
+    });
+});
+</script>
+{% endblock %}
