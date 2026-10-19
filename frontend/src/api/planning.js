@@ -7,40 +7,7 @@
 // (/api/composition): api_router подключается с prefix="/api", а сам
 // v1-роутер версию не добавляет.
 const BASE = '/api/planning';
-
-/**
- * Разбирает ответ сервера, приводя ошибку к единому виду.
- *
- * Тело ошибки у FastAPI лежит в detail, но его форма разная: строка для
- * 403/404/422 и объект {message, rejected} для 409. Компоненту удобнее
- * получать одинаковый Error с полем rejected — пустым, когда отказов
- * по операциям нет.
- */
-async function parseResponse(response) {
-  if (response.ok) {
-    return response.json();
-  }
-
-  let detail = null;
-  try {
-    const body = await response.json();
-    detail = body.detail;
-  } catch {
-    // Тело не JSON (например, HTML-страница 500). Оставляем detail = null
-    // и покажем общий текст: разбирать вёрстку ради сообщения незачем.
-  }
-
-  const error = new Error(
-    typeof detail === 'string'
-      ? detail
-      : detail?.message || 'Не удалось выполнить запрос'
-  );
-  error.status = response.status;
-  // Список непрошедших операций — только у 409. Всегда массив, чтобы
-  // вызывающий код не проверял наличие поля.
-  error.rejected = Array.isArray(detail?.rejected) ? detail.rejected : [];
-  throw error;
-}
+import { parseResponse } from './http';
 
 /**
  * Читает сетку загрузки подразделения на интервал.

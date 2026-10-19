@@ -1,0 +1,33 @@
+{# app/templates/admin/data.html #}
+{% extends "layouts/section.html" %}
+
+{# Раздел «Администрирование». Заведён на section.html сразу, хотя экран
+   пока один: следующие административные экраны ожидаются. Новый экран —
+   ещё один nav_item в блоке sidebar и свой шаблон. #}
+
+{% block title %}План и факт сотрудников{% endblock %}
+
+{% block sidebar %}
+  {{ nav_item("/admin/data", "План и факт") }}
+{% endblock %}
+
+{% block section_content %}
+<h1 class="h4 mb-1">План и факт сотрудников</h1>
+<p class="text-muted small mb-3">
+  Исправление плана и факта без ограничений процесса. Каждое сохранение —
+  с комментарием в журнале правок.
+</p>
+
+{# Точка монтирования React-острова. Данные сюда не подставляются:
+   остров забирает их сам через /api/admin/*. Содержимое — заглушка на
+   время загрузки бандла, React её затирает. #}
+<div id="admin-data-root">
+  <div class="text-muted py-5 text-center">Подключение…</div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+  {# Бандл собирается Vite из src/admin-data.jsx (вход admin-data).
+     Хэша в имени нет — после пересборки нужен hard-refresh (Ctrl+F5). #}
+  <script type="module" src="/static/js/admin-data.bundle.js"></script>
+{% endblock %}

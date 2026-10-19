@@ -89,7 +89,8 @@
   </thead>
   <tbody>
     {% for root in tree %}
-        {{ tree_table.render_dept_rows(root, manageable_ids, expanded_ids, can_manage_sets) }}
+                {{ tree_table.render_dept_rows(root, manageable_ids, expanded_ids,
+                                       can_manage_sets, plan_summary, status_names) }}
     {% endfor %}
   </tbody>
 </table>

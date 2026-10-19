@@ -577,3 +577,309 @@ body {
     min-width: 0;
     overflow-x: hidden;
 }
+
+/* ================================================================
+   Матрица факта инженера (главная) — FactMatrix.jsx.
+   Дописать в конец app/static/css/style.css.
+
+   Таблица намеренно БЕЗ класса Bootstrap .table: у него фон ячеек
+   красится слоями через --bs-table-bg-type и тени, а липкая колонка
+   при border-collapse: collapse теряет границы. Свои правила проще,
+   чем борьба с чужими. Полосы плана и факта — общие классы
+   .workload-bar*, цвета совпадают с сеткой начальника.
+   ================================================================ */
+
+/* Горизонтальная прокрутка: 31 день не помещается на узком экране. */
+.fact-matrix-wrap {
+    overflow-x: auto;
+    transition: opacity 0.15s;
+}
+
+/* Во время загрузки другого месяца — приглушаем и блокируем клики,
+   чтобы не отметить день по устаревшей картине. */
+.fact-matrix-wrap--loading {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+.fact-matrix {
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 0.875rem;
+}
+
+.fact-matrix th,
+.fact-matrix td {
+    border-bottom: 1px solid var(--bs-border-color-translucent);
+}
+
+/* --- колонка «Шифр» ------------------------------------------------ */
+
+/* Липкая слева: при прокрутке дней шифр остаётся виден. Фон обязателен,
+   иначе прокручиваемые клетки просвечивают сквозь колонку. */
+.fact-matrix__code {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    min-width: 14rem;
+    max-width: 18rem;
+    /* Отступ слева — от рамки карточки: лента лежит в .card. */
+    padding: 0.35rem 0.75rem;
+    text-align: left;
+    font-weight: 400;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background-color: var(--bs-body-bg);
+    border-right: 2px solid var(--bs-border-color);
+}
+
+thead .fact-matrix__code {
+    z-index: 3;
+    font-weight: 600;
+    vertical-align: bottom;
+}
+
+/* --- столбцы дней -------------------------------------------------- */
+
+.fact-matrix__day {
+    width: 2.25rem;
+    min-width: 2.25rem;
+    padding: 0.25rem 0;
+    text-align: center;
+    font-weight: 500;
+    line-height: 1.1;
+}
+
+.fact-matrix__weekday {
+    font-size: 0.7rem;
+    font-weight: 400;
+    color: var(--bs-secondary-color);
+}
+
+.fact-matrix__cell {
+    padding: 0.3rem 0.2rem;
+    vertical-align: middle;
+}
+
+/* Выходные и праздники. */
+.fact-matrix__day--nonwork {
+    background-color: var(--bs-tertiary-bg);
+    color: var(--bs-secondary-color);
+}
+
+/* Неявка: столбец гаснет. План остаётся виден как история — убирать
+   его или нет, решает начальник в своей сетке. */
+.fact-matrix__day--absence {
+    background-color: var(--bs-secondary-bg);
+}
+
+.fact-matrix__day--absence .workload-bar {
+    opacity: 0.45;
+}
+
+/* Сегодняшний столбец. Правило ниже выходных: если инженер открыл
+   страницу в субботу, подсветка «сегодня» важнее. */
+.fact-matrix__day--today {
+    background-color: rgba(var(--bs-primary-rgb), 0.08);
+}
+
+thead .fact-matrix__day--today {
+    color: var(--bs-primary);
+    font-weight: 700;
+}
+
+/* --- строка «Табель» ------------------------------------------------ */
+
+.fact-matrix__tab {
+    text-align: center;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--bs-secondary-color);
+}
+
+/* --- клетки ---------------------------------------------------------- */
+
+/* Пустая позиция полосы держит высоту клетки, чтобы строки с планом и
+   без него были одинаковыми. */
+.fact-matrix__slot {
+    background-color: transparent;
+}
+
+.fact-matrix__cell--clickable {
+    cursor: pointer;
+}
+
+.fact-matrix__cell--clickable:hover {
+    background-color: var(--bs-secondary-bg);
+}
+
+/* Пунктирное место под отметку там, где на открытый день стоит план:
+   подсказка «отметьте здесь», как на макете. Селектор соседа: позиция
+   факта идёт сразу за плановой полосой. */
+.fact-matrix__cell--clickable .workload-bar--plan + .fact-matrix__slot--fact {
+    border: 1px dashed var(--bs-primary);
+}
+
+/* В остальных открытых клетках пунктир появляется при наведении. */
+.fact-matrix__cell--clickable:hover .fact-matrix__slot--fact {
+    border: 1px dashed var(--bs-primary);
+}
+
+/* Сохранение: пунктир пульсирует, пока не пришёл ответ. */
+.fact-matrix__cell--saving {
+    cursor: progress;
+}
+
+.fact-matrix__cell--saving .workload-bar--pending {
+    animation: fact-pulse 1s ease-in-out infinite;
+}
+
+@keyframes fact-pulse {
+    50% {
+        opacity: 0.35;
+    }
+}
+
+/* --- шапка и легенда -------------------------------------------------- */
+
+/* Подпись месяца сделана кнопкой ради единой группы, но нажимать её
+   нечего. Bootstrap приглушает .disabled — возвращаем обычный вид. */
+.fact-range-label.disabled {
+    min-width: 12rem;
+    opacity: 1;
+    color: var(--bs-body-color);
+}
+
+.fact-legend__bar {
+    display: inline-block;
+    width: 1.75rem;
+    vertical-align: middle;
+}
+
+/* Поле поиска шифра не тянется на всю ширину карточки. */
+.fact-search__input {
+    max-width: 28rem;
+}
+/* --- раздел «Мой факт»: лента в карточке по ширине содержимого ------ */
+
+/* Обёртка всего блока: ширина по содержимому, но не шире страницы.
+   На широком мониторе лента не растягивается — справа остаётся поле;
+   на узком обёртка упирается в 100%, и внутри карточки появляется
+   нижний скролл (.fact-matrix-wrap). Строка над лентой и строка под
+   ней (кнопка, легенда) выравниваются по ширине ленты. */
+.fact-board {
+    display: inline-block;
+    max-width: 100%;
+    vertical-align: top;
+}
+
+/* ================================================================
+   Метка статуса шифра (set_statuses) — сетка загрузки, «Работы бюро».
+
+   Цвета ПОВТОРЯЮТ set_statuses.color из БД. Подставить hex из базы
+   можно только inline-стилем, а он в проекте запрещён, поэтому цвет
+   задаётся классом по номеру статуса. Если поменяете цвет в
+   справочнике — поправьте и здесь.
+
+   Цвет текста подобран под фон: на светлых (серый, оранжевый) —
+   тёмный, на насыщенных (синий, зелёный) — белый.
+   ================================================================ */
+.set-status {
+    font-weight: 500;
+}
+
+.set-status--1 {                /* В плане */
+    background-color: #9e9e9e;
+    color: #212529;
+}
+
+.set-status--2 {                /* В работе */
+    background-color: #2196f3;
+    color: #fff;
+}
+
+.set-status--3 {                /* На проверке */
+    background-color: #ff9800;
+    color: #212529;
+}
+
+.set-status--4 {                /* Выпущен */
+    background-color: #4caf50;
+    color: #fff;
+}
+
+/* Кружок статуса шифра в колонке «дн.» сетки загрузки и в легенде.
+   Цвет фона — из .set-status--N (см. выше), здесь только форма. */
+.set-status-dot {
+    display: inline-block;
+    flex-shrink: 0;
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 50%;
+}
+
+/* ================================================================
+   Раздел «Администрирование» — AdminGrid.jsx.
+   Дописать в конец app/static/css/style.css.
+
+   Таблица и полосы — общие классы сетки начальника (.workload-grid,
+   .workload-bar*): экраны выглядят одинаково. Здесь только то, чего
+   у начальника нет: две кликабельные полосы в одной клетке, окно
+   комментария, выбор сотрудника.
+   ================================================================ */
+
+/* Выбор сотрудника не тянется на всю ширину. */
+.admin-employee-select {
+    max-width: 28rem;
+}
+
+/* Подпись окна ленты — кнопка ради единой группы, нажимать нечего.
+   Bootstrap приглушает .disabled — возвращаем обычный вид. */
+.admin-range-label.disabled {
+    min-width: 12rem;
+    opacity: 1;
+    color: var(--bs-body-color);
+}
+
+/* Во время загрузки другого окна — приглушаем и блокируем клики,
+   чтобы не править по устаревшей картине. */
+.admin-grid--loading {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+/* Полоса клетки. В отличие от сетки начальника, кликается не клетка,
+   а каждая полоса отдельно: план и факт правятся независимо. Отступ
+   увеличивает площадь попадания — сама полоса тонкая. */
+.admin-slot {
+    padding: 2px 0;
+    border-radius: 0.2rem;
+}
+
+.admin-slot--clickable {
+    cursor: pointer;
+}
+
+.admin-slot--clickable:hover {
+    background-color: var(--bs-secondary-bg);
+}
+
+/* Полоса, по которой сервер отказал (409). */
+.admin-slot--rejected {
+    outline: 2px solid var(--bs-danger);
+    outline-offset: -1px;
+}
+
+/* Легенда: полосы в строку текста. */
+.admin-legend .workload-bar {
+    display: inline-block;
+    width: 1.75rem;
+    vertical-align: middle;
+}
+
+/* Окно комментария показывается без JS Bootstrap (.modal.d-block),
+   поэтому затемнение фона задаётся здесь, а не .modal-backdrop. */
+.admin-modal {
+    background-color: rgba(0, 0, 0, 0.4);
+}

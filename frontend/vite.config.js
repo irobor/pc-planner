@@ -23,10 +23,12 @@ export default defineConfig({
       //    src/composition-create.jsx — в B.3 (страница создания состава,
       //    вход B). До появления файла НЕ собирать (vite build упадёт
       //    «вход не найден»).
-      input: { 
-        workload: resolve(__dirname, 'src/workload.jsx'),       
+      input: {
+        workload: resolve(__dirname, 'src/workload.jsx'),
         composition: resolve(__dirname, 'src/composition.jsx'),
         'composition-create': resolve(__dirname, 'src/composition-create.jsx'),
+        fact: resolve(__dirname, 'src/fact.jsx'),
+        'admin-data': resolve(__dirname, 'src/admin-data.jsx'),
       },
 
       output: {

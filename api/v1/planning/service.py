@@ -11,7 +11,7 @@
 несколько шифров вырождается в сотни обращений: именно этим страдала
 PL/pgSQL-функция fill_plan_cells, которую мы заменяем.
 
-Запись изменений (apply_changes, _rebuild_plan) появится следующим
+Запись изменений (apply_changes, rebuild_plan) появится следующим
 шагом — поверх этого же контекста.
 """
 import logging
@@ -19,7 +19,6 @@ from datetime import date, timedelta
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import func, or_, select
 from sqlalchemy import delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +34,8 @@ from app.api.v1.planning.rules import (
     WorkPlanInfo,
     day_verdict,
     DayState,
+    PLAN_STATUS_IDS,
+    set_allows_plan,
 )
 from app.api.v1.planning.schemas import (
     CellOut,
@@ -46,7 +47,7 @@ from app.api.v1.planning.schemas import (
     CellOperation,
 )
 from app.core.scope import Scope
-from app.models.composition import ProjectMarkSet, ProjectComposition
+from app.models.composition import ProjectComposition, ProjectMarkSet, SetStatus
 from app.models.employee import Employee, EmployeeAssignment
 from app.models.planning import (
     AbsencePeriod,
@@ -61,13 +62,13 @@ from app.models.planning import (
 logger = logging.getLogger(__name__)
 
 
-# Статусы комплектов, попадающие в сетку загрузки.
-# set_statuses: 1 «В плане», 2 «В работе», 3 «На проверке», 4 «Выпущен».
-# Новый шифр создаётся со статусом 1 (см. STATUS_SET_PLANNED в
-# planner.py), поэтому фильтр только по «В работе» сделал бы свежий
-# шифр непланируемым: чтобы перейти в работу, его надо сначала
-# спланировать. Выпущенные отсеиваем — работа по ним закончена.
-GRID_STATUS_IDS: tuple[int, ...] = (1, 2)
+# Статусы комплектов, попадающие в сетку как строки «я исполнитель».
+# Совпадают со статусами, в которые можно добавлять план
+# (rules.PLAN_STATUS_IDS): шифр, который нельзя планировать, незачем
+# подтягивать в сетку как рабочий. Одна константа — два правила не
+# разойдутся. Шифры других статусов всё равно видны, если в окне у них
+# есть план или факт: это история занятости инженера.
+GRID_STATUS_IDS: tuple[int, ...] = PLAN_STATUS_IDS
 
 # Предел ширины запрашиваемого интервала. Сетка прокручивается свободно,
 # но подгружается окнами: держать в памяти год на бюро незачем, а
@@ -531,6 +532,15 @@ async def load_context(
 # Сборка сетки загрузки
 # ---------------------------------------------------------------------------
 
+async def load_set_status_names(db: AsyncSession) -> dict[int, str]:
+    """Справочник статусов шифра: id → название.
+
+    Четыре строки — отдельный крошечный запрос дешевле, чем тянуть
+    название через все загрузчики шифров. Нужен для метки статуса в
+    строке сетки и для текста отказа SET_CLOSED.
+    """
+    rows = await db.execute(select(SetStatus.id, SetStatus.name))
+    return {status_id: name for status_id, name in rows.all()}
 
 async def get_availability(
     db: AsyncSession,
@@ -573,15 +583,22 @@ async def get_availability(
     ctx = await load_context(
         db, employees=employees, date_from=date_from, date_to=date_to
     )
-    return _build_grid(ctx)
+    status_names = await load_set_status_names(db)
+    return _build_grid(ctx, status_names)
 
 
-def _collect_rows(ctx: AvailabilityContext) -> list[RowOut]:
+def _collect_rows(
+    ctx: AvailabilityContext,
+    status_names: dict[int, str],
+) -> list[RowOut]:
     """Строит строки сетки — пары (инженер, шифр) из трёх источников.
 
     Источники те же, что в _load_mark_sets: назначенный исполнитель,
     плановые ячейки, фактические ячейки. Здесь они раскладываются по
     инженерам, а там просто собирались шифры.
+    status_names — справочник статусов (load_set_status_names): название
+    для метки в строке. Допустимость плана (allows_plan) считается
+    правилом set_allows_plan, а не фронтом.
     """
     # Множество шифров под каждым инженером. Порядок сборки неважен —
     # сортировка в конце.
@@ -620,6 +637,12 @@ def _collect_rows(ctx: AvailabilityContext) -> list[RowOut]:
                     mark_set_id=mark_set_id,
                     marka_full=mark_set.marka_full,
                     status_id=mark_set.status_id,
+                    status_name=(
+                        status_names.get(mark_set.status_id)
+                        if mark_set.status_id is not None
+                        else None
+                    ),
+                    allows_plan=set_allows_plan(mark_set.status_id),
                     is_executor=mark_set.id_executor == emp_id,
                     work_plan_id=plan.id if plan else None,
                     start_date=plan.start_date if plan else None,
@@ -706,8 +729,24 @@ def _collect_cells(ctx: AvailabilityContext) -> list[CellOut]:
     cells.sort(key=lambda cell: (cell.employee_id, cell.work_date))
     return cells
 
+def grid_rows_and_cells(
+    ctx: AvailabilityContext,
+    status_names: dict[int, str],
+) -> tuple[list[RowOut], list[CellOut]]:
+    """Строки и клетки сетки из снимка — для экрана администратора.
 
-def _build_grid(ctx: AvailabilityContext) -> WorkloadGrid:
+    Публичная обёртка над _collect_rows и _collect_cells: администратор
+    показывает те же строки и клетки, что начальник (у одного сотрудника
+    они дают обе полосы — план и факт), а слой дней у него свой.
+    Обёртка, а не переименование: внутренние функции остаются
+    внутренними, и чужой модуль зависит от одной явной точки входа.
+    """
+    return _collect_rows(ctx, status_names), _collect_cells(ctx)
+
+def _build_grid(
+    ctx: AvailabilityContext,
+    status_names: dict[int, str],
+) -> WorkloadGrid:
     """Раскладывает снимок контекста в плоские слои ответа.
 
     Функция синхронная и чистая: БД не трогает, на вход — контекст, на
@@ -730,7 +769,7 @@ def _build_grid(ctx: AvailabilityContext) -> WorkloadGrid:
         horizon_from=ctx.horizon_from,
         horizon_to=ctx.horizon_to,
         employees=employees,
-        rows=_collect_rows(ctx),
+        rows=_collect_rows(ctx, status_names),
         days=_collect_days(ctx),
         cells=_collect_cells(ctx),
     )
@@ -775,6 +814,8 @@ class RejectedOperation:
     conflicting_employee: Optional[str] = None
     # ABSENCE: буква табеля.
     tab_letter: Optional[str] = None
+    # SET_CLOSED: название статуса шифра («Выпущен», «На проверке»).
+    status_name: Optional[str] = None
 
 
 class OperationsRejectedError(PlanningError):
@@ -979,6 +1020,7 @@ def _validate_operations(
     mark_sets: dict[int, MarkSetRow],
     occupancy: dict[tuple[int, date], tuple[int, int]],
     operations: list[CellOperation],
+    status_names: dict[int, str],
 ) -> list[RejectedOperation]:
     """Проверяет пачку операций против снимка. Пустой список = всё прошло.
 
@@ -1035,6 +1077,25 @@ def _validate_operations(
         occupied = occupant is not None and set_key not in freed_on_set
 
         if operation.op == "add":
+            # Закрытый шифр (на проверке, выпущен) планировать нельзя.
+            # Проверяется первым: на закрытом комплекте занятость дня уже
+            # ничего не решает. Снятие (remove) разрешено при любом
+            # статусе — им начальник освобождает инженеру будущие дни.
+            if not set_allows_plan(mark_set.status_id):
+                rejections.append(
+                    RejectedOperation(
+                        mark_set_id=operation.mark_set_id,
+                        work_date=operation.work_date,
+                        state=DayState.SET_CLOSED,
+                        conflicting_marka=mark_set.marka_full,
+                        status_name=(
+                            status_names.get(mark_set.status_id)
+                            if mark_set.status_id is not None
+                            else None
+                        ),
+                    )
+                )
+                continue
             # Исполнитель выводится из шифра, а не из запроса: подмена
             # id не позволит запланировать работу чужому человеку.
             employee_id = mark_set.id_executor
@@ -1142,6 +1203,8 @@ async def apply_changes(
 
     mark_set_ids = {operation.mark_set_id for operation in operations}
     mark_sets = await _load_operation_mark_sets(db, scope, mark_set_ids)
+    # Справочник статусов: для отказа SET_CLOSED и для строк ответа.
+    status_names = await load_set_status_names(db)    
 
     # Границы снимка — только затронутые даты, обычно несколько дней.
     dates = [operation.work_date for operation in operations]
@@ -1163,7 +1226,9 @@ async def apply_changes(
         db, employees=employees, date_from=date_from, date_to=date_to
     )
 
-    rejections = _validate_operations(ctx, mark_sets, occupancy, operations)
+    rejections = _validate_operations(
+        ctx, mark_sets, occupancy, operations, status_names
+    )
     if rejections:
         raise OperationsRejectedError(rejections)
 
@@ -1206,7 +1271,7 @@ async def apply_changes(
         touched = set(added) | set(removed)
         for mark_set_id, employee_id in touched:
             plan = ctx.work_plans.get((mark_set_id, employee_id))
-            await _rebuild_plan(
+            await rebuild_plan(
                 db,
                 mark_set_id=mark_set_id,
                 employee_id=employee_id,
@@ -1233,8 +1298,8 @@ async def apply_changes(
         )
         raise OperationsRejectedError(
             _validate_operations(
-                fresh_ctx, mark_sets, fresh_occupancy, operations
-            )
+                fresh_ctx, mark_sets, fresh_occupancy, operations, status_names
+              )
         )
 
     # Свежее состояние затронутых инженеров — чтобы React перерисовал
@@ -1247,14 +1312,14 @@ async def apply_changes(
     )
     return ApplyResult(
         applied=len(operations),
-        rows=_collect_rows(result_ctx),
+        rows=_collect_rows(result_ctx, status_names),
         days=_collect_days(result_ctx),
         cells=_collect_cells(result_ctx),
         rejected=[],
     )
 
 
-async def _rebuild_plan(
+async def rebuild_plan(
     db: AsyncSession,
     *,
     mark_set_id: int,

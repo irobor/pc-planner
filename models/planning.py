@@ -37,12 +37,12 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    FetchedValue,
     ForeignKey,
     Index,
     String,
     Text,
-    UniqueConstraint,
-    FetchedValue,
+    UniqueConstraint,    
     func,
     text,
 )
@@ -453,7 +453,8 @@ class FactCalendarCell(Base):
 
     override_reason: Mapped[Optional[str]] = mapped_column(Text)
 
-        # Ретроввод: отметка поставлена или перенесена после окончания
+
+    # Ретроввод: отметка поставлена или перенесена после окончания
     # work_date. Значение вычисляет триггер trg_fact_check_absence, а не
     # приложение — поэтому server_default на вставку и FetchedValue на
     # обновление: SQLAlchemy знает, что база меняет поле сама, и не

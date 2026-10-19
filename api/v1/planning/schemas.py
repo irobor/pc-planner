@@ -59,6 +59,17 @@ class RowOut(BaseModel):
     mark_set_id: int
     marka_full: str
     status_id: Optional[int] = None
+    
+    # Название статуса для метки в строке («В работе», «Выпущен»).
+    # Цвет метки задаётся в style.css классом по status_id
+    # (.set-status--N), а не цветом из set_statuses.color: hex-цвет
+    # пришлось бы подставлять inline-стилем.
+    status_name: Optional[str] = None
+
+    # Можно ли добавлять план в этот шифр (rules.set_allows_plan).
+    # False — на проверке или выпущен: строка видна как история,
+    # клетки с планом можно снять, пустые не кликаются.
+    allows_plan: bool
 
     # Инженер назначен исполнителем этого шифра. False означает, что
     # строка подтянулась из ячеек: чужая работа или факт вне плана.

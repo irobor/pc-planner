@@ -40,7 +40,17 @@
                         <a class="nav-link{% if section == '' %} active{% endif %}"
                            href="/">Главная</a>
                     </li>
-
+                        {# Мой факт — ежедневная отметка инженера, поэтому сразу
+                       после «Главной». Два условия: право и кадровая
+                       карточка. Администратор проходит can() через обход,
+                       но у служебной учётки карточки нет — пункт вёл бы на
+                       экран с пояснением вместо матрицы. #}
+                    {% if can("fact:own") and user.employee %}
+                    <li class="nav-item">
+                        <a class="nav-link{% if section == 'fact' %} active{% endif %}"
+                           href="/fact">Мой факт</a>
+                    </li>
+                    {% endif %}
                     {% if can("composition:view") %}
                     <li class="nav-item">
                         <a class="nav-link{% if section == 'project-composition' %} active{% endif %}"
@@ -56,13 +66,12 @@
                            href="/planner/works">Планировщик</a>
                     </li>
                     {% endif %}
-
-                    {# Администрирование — только суперпользователю. Отдельного
-                       права под раздел в permissions нет: заводить его под
-                       страницу-заглушку преждевременно, поэтому проверяем
-                       роль напрямую. Заменить на can(), когда появится
-                       содержимое и станет ясно, кому ещё нужен доступ. #}
-                    {% if user.is_superuser %}
+                    {# Администрирование — правка плана и факта без ограничений
+                       процесса. Условие совпадает с гардами страницы /admin:
+                       пункт виден ровно тем, кому раздел откроется. Только
+                       can(): роль admin проходит через обход прав, роль
+                       data_admin — по своим правам. #}
+                    {% if can("plan:override") and can("fact:override") %}
                     <li class="nav-item">
                         <a class="nav-link{% if section == 'admin' %} active{% endif %}"
                            href="/admin">Администрирование</a>

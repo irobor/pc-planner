@@ -1,0 +1,1 @@
+async function s(t){if(t.ok)return t.json();let r=null;try{r=(await t.json()).detail}catch{}const e=new Error(typeof r=="string"?r:(r==null?void 0:r.message)||"Не удалось выполнить запрос");throw e.status=t.status,e.rejected=Array.isArray(r==null?void 0:r.rejected)?r.rejected:[],e}export{s as p};

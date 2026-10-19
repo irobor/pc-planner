@@ -300,6 +300,23 @@ function EmployeeCell({ day, busy, columnClasses }) {
   );
 }
 
+/**
+ * Статусы, встречающиеся в строках окна, — для легенды.
+ *
+ * Берём из ответа сервера, а не из списка в коде: названия живут в
+ * справочнике set_statuses, и дублировать их здесь незачем.
+ * Возвращает пары [id, название] по возрастанию id.
+ */
+function statusLegendOf(rows) {
+  const byId = new Map();
+  for (const row of rows) {
+    if (row.status_id != null && !byId.has(row.status_id)) {
+      byId.set(row.status_id, row.status_name);
+    }
+  }
+  return [...byId.entries()].sort((a, b) => a[0] - b[0]);
+}
+
 // --- компонент -------------------------------------------------------
 
 export default function WorkloadGrid({ departmentId, today, canEdit }) {
@@ -720,6 +737,7 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
                           <code className="workload-marka">
                             {row.marka_full}
                           </code>
+                          
                           {!row.is_executor && (
                             <span
                               className="badge text-bg-secondary ms-2"
@@ -729,8 +747,23 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
                             </span>
                           )}
                         </td>
-                        <td className="workload-grid__days">
-                          {row.work_days ?? '—'}
+                                                <td className="workload-grid__days">
+                          {/* Слева кружок статуса, справа дни. Кружок не
+                              занимает ширины колонки «Шифр»: длинный шифр
+                              не вытесняет статус. Название — по наведению. */}
+                          <div className="d-flex align-items-center justify-content-between">
+                            {row.status_name ? (
+                              <span
+                                className={`set-status-dot set-status--${row.status_id}`}
+                                title={`Статус: ${row.status_name}`}
+                                role="img"
+                                aria-label={`Статус: ${row.status_name}`}
+                              />
+                            ) : (
+                              <span />
+                            )}
+                            <span>{row.work_days ?? '—'}</span>
+                          </div>
                         </td>
                         {dates.map((iso) => {
                           const setKey = planKey(row.mark_set_id, iso);
@@ -759,7 +792,13 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
                             // исполнитель: сервер берёт человека из
                             // шифра, и клик по чужой строке завёл бы
                             // план не тому.
-                            if (!row.is_executor) {
+                          if (!row.allows_plan) {
+                              // Шифр на проверке или выпущен: сервер
+                              // откажет (SET_CLOSED). Снятие плана эта
+                              // ветка не трогает — она только для
+                              // пустых клеток.
+                              title = `Шифр в статусе «${row.status_name}»: план можно только снять`;
+                            } else if (!row.is_executor) {
                               title = 'Планировать может только исполнитель';
                             } else if (owner !== undefined) {
                               // Дата шифра уже занята — возможно, за
@@ -840,6 +879,13 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
         <span className="ms-3">
           верхняя строка пары — план, нижняя — факт
         </span>
+        {/* Статусы шифров — только те, что есть в окне. */}
+        {statusLegendOf(grid.rows).map(([statusId, statusName]) => (
+          <span key={statusId} className="ms-3 d-inline-flex align-items-center gap-1">
+            <span className={`set-status-dot set-status--${statusId}`} />
+            {statusName}
+          </span>
+        ))}
       </div>
     </div>
   );

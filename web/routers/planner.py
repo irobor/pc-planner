@@ -27,6 +27,7 @@ from app.models.composition import Department, ProjectComposition, ProjectMarkSe
 from app.models.employee import Employee, EmployeeAssignment
 from app.models.project import Project
 from app.models.user import User
+from app.models.planning import WorkPlan
 from app.web.templates import templates
 
 
@@ -64,6 +65,11 @@ STATUS_FILTERS: dict[str, Optional[tuple[int, ...]]] = {
     "all": None,
 }
 DEFAULT_STATUS_FILTER = "active"
+
+# Статусы плана, которые считаются действующими. Тот же фильтр, что в
+# сервисе планирования (_load_work_plans): архивные планы в сводку
+# не попадают.
+ACTIVE_PLAN_STATUSES: tuple[str, ...] = ("draft", "confirmed")
 
 
 async def _load_bureau_projects(
@@ -277,6 +283,39 @@ async def planner_works(
             )
         ).scalars().all()
     )
+
+        # Сводка планов по шифрам проекта — для колонок «Дни» и «Срок».
+    # Одним агрегирующим запросом, а не по запросу на шифр:
+    #   Дни       — сумма человеко-дней по ВСЕМ активным планам шифра;
+    #   Срок      — самый поздний последний день;
+    #   executors — сколько разных людей: при передаче работы или
+    #               параллельной разработке сумма сложена из нескольких.
+    set_ids = [s.id for c in compositions for s in c.mark_sets]
+    plan_summary: dict[int, dict[str, object]] = {}
+    if set_ids:
+        plan_rows = await db.execute(
+            select(
+                WorkPlan.mark_set_id,
+                func.sum(WorkPlan.work_days),
+                func.max(WorkPlan.end_date),
+                func.count(func.distinct(WorkPlan.employee_id)),
+            )
+            .where(
+                WorkPlan.mark_set_id.in_(set_ids),
+                WorkPlan.status.in_(ACTIVE_PLAN_STATUSES),
+            )
+            .group_by(WorkPlan.mark_set_id)
+        )
+        plan_summary = {
+            mark_set_id: {"days": days, "end_date": end_date, "executors": count}
+            for mark_set_id, days, end_date, count in plan_rows.all()
+        }
+
+    # Названия статусов для метки в строке шифра. Справочник уже
+    # загружен для карточки — второго запроса не нужно.
+    status_names = {st.id: st.name for st in set_statuses}
+
+
     expanded_ids = collect_expanded_ids(tree, manageable_ids)
 
     return templates.TemplateResponse(
@@ -296,6 +335,10 @@ async def planner_works(
             "executors": executors,
             "recipients": recipients,
             "set_statuses": set_statuses,
+                        # Для макроса дерева — он подключён через import и контекст
+            # страницы не видит, поэтому данные передаются аргументами.
+            "plan_summary": plan_summary,
+            "status_names": status_names,
         },
     )
 

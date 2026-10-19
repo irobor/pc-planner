@@ -25,6 +25,17 @@ from datetime import date
 from enum import Enum
 from typing import Optional
 
+# Статусы шифра (set_statuses.id), в которые можно ДОБАВЛЯТЬ план:
+# 1 — В плане, 2 — В работе.
+# «На проверке» (3): документ у проверяющего, работы у разработчика нет;
+# вернут на доработку — статус снова станет «В работе».
+# «Выпущен» (4): комплект закрыт.
+# Снимать план можно при любом статусе — так начальник освобождает
+# инженеру будущие дни после выпуска.
+# Эта же константа задаёт строки «я исполнитель» в сетке
+# (service.GRID_STATUS_IDS): шифр, который нельзя планировать, незачем
+# подтягивать в сетку как рабочий.
+PLAN_STATUS_IDS: tuple[int, ...] = (1, 2)
 
 class DayState(str, Enum):
     """Состояние дня инженера с точки зрения планирования.
@@ -64,6 +75,14 @@ class DayState(str, Enum):
     # выдаёт, потому что отвечает на вопрос про день инженера, а это
     # правило про день шифра.
     DAY_TAKEN = "day_taken"
+
+    
+    # Шифр в статусе вне PLAN_STATUS_IDS (на проверке, выпущен) —
+    # добавлять план нельзя. Как и DAY_TAKEN, это не состояние дня, а
+    # причина отказа операции: day_verdict его не выдаёт. Живёт в этом
+    # перечислении, чтобы отказ шёл общим списком rejected и сетка
+    # подсветила клетку без отдельной ветки кода.
+    SET_CLOSED = "set_closed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +255,14 @@ class AvailabilityContext:
     # Ключ — пара (mark_set_id, employee_id), как у idx_one_active_plan.
     work_plans: dict[tuple[int, int], WorkPlanInfo]
 
+
+def set_allows_plan(status_id: Optional[int]) -> bool:
+    """Можно ли добавить план в шифр с этим статусом.
+
+    None (статус не загружен) — запрет: безопаснее отказать, чем
+    запланировать в закрытый комплект.
+    """
+    return status_id is not None and status_id in PLAN_STATUS_IDS
 
 def base_day_verdict(
     ctx: AvailabilityContext,

@@ -1,0 +1,37 @@
+{# app/templates/fact/index.html #}
+{% extends "layouts/app.html" %}
+
+{# Раздел «Мой факт». Пока экран один — без бокового меню
+   (см. комментарий в layouts/section.html). Когда появятся «История» и
+   «Статистика», заменить родителя на layouts/section.html и вынести
+   содержимое в блок section_content. #}
+
+{% block title %}Мой факт{% endblock %}
+
+{% block content %}
+<h1 class="h4 mb-3">Мой факт</h1>
+
+{% if can_mark %}
+  {# Точка монтирования React-острова. Данные сюда не подставляются:
+     остров забирает их сам через GET /api/fact/month. Содержимое —
+     заглушка на время загрузки бандла, React её затирает. #}
+  <div id="fact-root">
+    <div class="text-muted py-5 text-center">Подключение матрицы…</div>
+  </div>
+{% else %}
+  {# Право есть (например, у администратора через обход), а кадровой
+     карточки нет — факт ставить не от кого. Объясняем, а не молчим. #}
+  <div class="alert alert-info" role="alert">
+    Отметка факта доступна сотрудникам с кадровой карточкой. Ваша учётная
+    запись не связана с сотрудником — обратитесь к администратору.
+  </div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+  {# Бандл — только когда есть точка монтирования. Хэша в имени нет:
+     после пересборки нужен hard-refresh (Ctrl+F5). #}
+  {% if can_mark %}
+  <script type="module" src="/static/js/fact.bundle.js"></script>
+  {% endif %}
+{% endblock %}

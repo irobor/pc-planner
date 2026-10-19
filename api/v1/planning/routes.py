@@ -93,6 +93,20 @@ def _describe(rejection: RejectedOperation) -> str:
             f"{day}: день уже отработан{suffix}. "
             "План на отработанный день не изменяется."
         )
+
+    if state is DayState.SET_CLOSED:
+        # Статус показываем как есть, в кавычках («Выпущен», «На
+        # проверке»): так не нужно согласовывать падеж и род.
+        marka = rejection.conflicting_marka or "Шифр"
+        if rejection.status_name:
+            reason = f"в статусе «{rejection.status_name}»"
+        else:
+            reason = "закрыт для планирования"
+        return (
+            f"{day}: {marka} {reason} — добавлять план нельзя, "
+            "можно только снять."
+        )
+    
     if state is DayState.BUSY:
         marka = rejection.conflicting_marka
         if marka:

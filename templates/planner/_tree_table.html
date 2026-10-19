@@ -18,6 +18,7 @@
 {# ------------------------------------------------------------------ #}
 
 {% macro render_dept_rows(node, manageable_ids, expanded_ids, can_create,
+                          plan_summary, status_names,
                           level=0, path="", hidden=False) %}
 {% set is_mine = node.department.id in manageable_ids %}
 {# Раскрыта ли ветка при загрузке: свои и путь к ним — да, чужие — нет. #}
@@ -99,17 +100,37 @@
       {% endif %}>
     <td class="planner-tree__name planner-tree__level-{{ level + 2 }}">
       <span class="planner-tree__code">{{ set_item.marka_full }}</span>
+      {# Статус — меткой с текстом: здесь, в отличие от сетки загрузки,
+         места хватает. Цвет — класс по номеру статуса (style.css). #}
+      <span class="badge set-status set-status--{{ set_item.status_id }} ms-1">
+        {{ status_names.get(set_item.status_id, "") }}
+      </span>
       {% if set_item.recipient_composition_id %}
       <span class="badge bg-primary-subtle text-primary-emphasis">
         &rarr; задание
       </span>
       {% endif %}
     </td>
-    {# Колонки плана. work_plan ещё не реализован — прочерк показывает,
-       что шифр заведён, но не спланирован. Это рабочее состояние: мы
-       развели назначение исполнителя и планирование. #}
+    {# Колонки плана — сводка по ВСЕМ активным планам шифра (роут,
+       plan_summary): Дни — сумма человеко-дней, Срок — самый поздний
+       последний день. Несколько исполнителей (передача работы,
+       параллельная разработка) помечаются «N исп.», чтобы было видно,
+       что сумма сложена из разных людей.
+       Прочерк — шифр заведён, но не спланирован: рабочее состояние,
+       назначение исполнителя и планирование разведены. #}
+    {% set plan = plan_summary.get(set_item.id) %}
+    {% if plan %}
+    <td class="text-end">{{ plan.days }}</td>
+    <td>
+      {{ plan.end_date.strftime("%d.%m.%Y") if plan.end_date else "—" }}
+      {% if plan.executors > 1 %}
+      <span class="text-muted small ms-1">· {{ plan.executors }} исп.</span>
+      {% endif %}
+    </td>
+    {% else %}
     <td class="text-end text-muted">—</td>
     <td class="text-muted">не спланирован</td>
+    {% endif %}
     <td>{{ set_item.executor.full_name if set_item.executor else "" }}</td>
   </tr>
   {% endfor %}
@@ -129,6 +150,7 @@
 {# Дочерние отделы — рекурсия с накоплением пути и уровня отступа. #}
 {% for child in node.children %}
 {{ render_dept_rows(child, manageable_ids, expanded_ids, can_create,
+                    plan_summary, status_names,
                     level + 1, node_path, child_hidden) }}
 {% endfor %}
 {% endmacro %}

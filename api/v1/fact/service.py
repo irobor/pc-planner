@@ -7,7 +7,7 @@
 тот же AvailabilityContext, собранный по одному инженеру.
 
 Три сценария:
-  * load_fact_month  — матрица на месяц (чтение);
+  * load_fact_window — лента от якорного дня (чтение);
   * search_mark_sets — поиск шифра для «+ добавить шифр» (чтение);
   * set_mark         — отметка одного дня (запись).
 
@@ -16,7 +16,6 @@
 """
 
 import logging
-from calendar import monthrange
 from datetime import date, timedelta
 from typing import Optional
 
@@ -38,7 +37,7 @@ from app.api.v1.fact.rules import (
 from app.api.v1.fact.schemas import (
     FactCellOut,
     FactDayOut,
-    FactMonth,
+    FactWindow,
     FactRowOut,
     MarkResult,
     MarkSetFound,
@@ -53,6 +52,15 @@ from app.models.composition import Department, ProjectComposition, ProjectMarkSe
 from app.models.planning import FactCalendarCell
 
 logger = logging.getLogger(__name__)
+
+# Лента: сколько дней показывать до и после якорного дня (по умолчанию
+# якорь — сегодня) и на сколько сдвигают стрелки. Сегодня оказывается
+# на трети ленты: две недели истории (не забыл ли отметиться, нет ли
+# отставания) и четыре недели плана впереди. 43 дня — шире месяца, так
+# что на стыке месяцев вчерашний день всегда на экране.
+DAYS_BACK: int = 14
+DAYS_FORWARD: int = 28
+SHIFT_DAYS: int = 7
 
 # Поиск шифра: минимальная длина строки (после обрезки пробелов) и
 # предел выдачи. Короткая строка дала бы сотни совпадений по общему
@@ -83,11 +91,11 @@ class FactError(Exception):
     """Базовое исключение сервиса факта."""
 
 
-class InvalidMonthError(FactError):
-    """Месяц целиком вне заполненного производственного календаря."""
+class InvalidWindowError(FactError):
+    """Лента целиком вне заполненного производственного календаря."""
 
     def __init__(self, horizon_from: date, horizon_to: date) -> None:
-        super().__init__("Месяц вне производственного календаря")
+        super().__init__("Лента вне производственного календаря")
         self.horizon_from = horizon_from
         self.horizon_to = horizon_to
 
@@ -134,10 +142,12 @@ class ConcurrentChangeError(FactError):
 # ---------------------------------------------------------------------------
 
 
-def month_bounds(year: int, month: int) -> tuple[date, date]:
-    """Первый и последний день месяца (включительно)."""
-    last_day = monthrange(year, month)[1]
-    return date(year, month, 1), date(year, month, last_day)
+def window_bounds(anchor: date) -> tuple[date, date]:
+    """Первый и последний день ленты (включительно) для якоря."""
+    return (
+        anchor - timedelta(days=DAYS_BACK),
+        anchor + timedelta(days=DAYS_FORWARD),
+    )
 
 
 async def _load_window_from(db: AsyncSession, today: date) -> date:
@@ -292,41 +302,49 @@ def _collect_cells(ctx: AvailabilityContext, employee_id: int) -> list[FactCellO
 
 
 # ---------------------------------------------------------------------------
-# Сценарий 1. Матрица на месяц
+# Сценарий 1. Лента от якорного дня
 # ---------------------------------------------------------------------------
 
 
-async def load_fact_month(
+async def load_fact_window(
     db: AsyncSession,
     *,
     employee_id: int,
-    year: int,
-    month: int,
+    anchor: date,
     today: date,
-) -> FactMonth:
-    """Матрица инженера на месяц: строки, вердикты дней, клетки.
+) -> FactWindow:
+    """Лента инженера: DAYS_BACK дней до якоря и DAYS_FORWARD после.
 
-    Контекст грузится РОВНО на месяц — так строки определяются только
-    этим месяцем. Окно отметки считается отдельно, от today.
+    Контекст грузится РОВНО на ленту — строки определяются только ею.
+    Окно отметки считается отдельно, от today: инженер может сдвинуть
+    ленту в прошлое, а открыты всё равно сегодня и предыдущий рабочий
+    день.
 
-    Месяц, частично выходящий за календарь, допустим: дни за краем
-    получат out_of_horizon. Целиком за краем — InvalidMonthError.
+    Якоря соседних положений (±SHIFT_DAYS) считаются здесь же: стрелка
+    гаснет (None), если лента уже упёрлась в край календаря.
+
+    Лента, частично выходящая за календарь, допустима: дни за краем
+    получат out_of_horizon. Целиком за краем — InvalidWindowError.
     """
-    date_from, date_to = month_bounds(year, month)
+    date_from, date_to = window_bounds(anchor)
     ctx = await _load_employee_context(db, employee_id, date_from, date_to)
 
     if date_to < ctx.horizon_from or date_from > ctx.horizon_to:
-        raise InvalidMonthError(ctx.horizon_from, ctx.horizon_to)
+        raise InvalidWindowError(ctx.horizon_from, ctx.horizon_to)
 
     window_from = await _load_window_from(db, today)
+    shift = timedelta(days=SHIFT_DAYS)
 
-    return FactMonth(
-        year=year,
-        month=month,
+    return FactWindow(
+        anchor=anchor,
+        # Назад — пока левый край ленты не дошёл до начала календаря;
+        # вперёд — пока правый не дошёл до конца.
+        prev_anchor=anchor - shift if date_from > ctx.horizon_from else None,
+        next_anchor=anchor + shift if date_to < ctx.horizon_to else None,
         date_from=date_from,
         date_to=date_to,
         today=today,
-        window_from=window_from,
+        mark_window_from=window_from,
         horizon_from=ctx.horizon_from,
         horizon_to=ctx.horizon_to,
         rows=_collect_rows(ctx, employee_id),
@@ -354,6 +372,7 @@ async def search_mark_sets(
     *,
     department_id: Optional[int],
     query: str,
+    status_ids: Optional[tuple[int, ...]] = FACT_STATUS_IDS,
 ) -> list[MarkSetFound]:
     """Шифры по подстроке — вся организация, ближние сначала.
 
@@ -367,6 +386,10 @@ async def search_mark_sets(
           родителем; если сам инженер числится на уровне отдела — бюро
           внутри него;
       2 — остальная организация.
+
+    status_ids — какие статусы искать. По умолчанию FACT_STATUS_IDS
+    (инженеру выпущенный шифр не нужен). None — любые: администратор
+    данных исправляет и выпущенные комплекты.
     """
     text_query = query.strip()
     if len(text_query) < SEARCH_MIN_LENGTH:
@@ -398,6 +421,12 @@ async def search_mark_sets(
             else_=2,
         )
 
+    conditions = [
+        ProjectMarkSet.marka_full.ilike(f"%{_escape_like(text_query)}%", escape="\\"),
+    ]
+    if status_ids is not None:
+        conditions.append(ProjectMarkSet.status_id.in_(status_ids))
+
     stmt = (
         select(
             ProjectMarkSet.id,
@@ -411,12 +440,7 @@ async def search_mark_sets(
             ProjectComposition.id == ProjectMarkSet.composition_id,
         )
         .join(Department, Department.id == ProjectComposition.department_id)
-        .where(
-            ProjectMarkSet.marka_full.ilike(
-                f"%{_escape_like(text_query)}%", escape="\\"
-            ),
-            ProjectMarkSet.status_id.in_(FACT_STATUS_IDS),
-        )
+        .where(*conditions)
         .order_by(proximity, ProjectMarkSet.marka_full)
         .limit(SEARCH_LIMIT)
     )
