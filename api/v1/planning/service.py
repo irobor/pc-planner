@@ -605,14 +605,14 @@ def _collect_rows(
     pairs: dict[int, set[int]] = {emp_id: set() for emp_id in ctx.employees}
 
     # Источник 1: назначенный исполнитель.
-    for mark_set in ctx.mark_sets.values():
-        if mark_set.id_executor in pairs:
-            pairs[mark_set.id_executor].add(mark_set.id)
+    for candidate in ctx.mark_sets.values():
+        if candidate.id_executor in pairs:
+            pairs[candidate.id_executor].add(candidate.id)
 
     # Источники 2 и 3: шифры, засветившиеся в ячейках инженера.
-    for (emp_id, _work_date), plan in ctx.plan_cells.items():
+    for (emp_id, _work_date), plan_cell in ctx.plan_cells.items():
         if emp_id in pairs:
-            pairs[emp_id].add(plan.mark_set_id)
+            pairs[emp_id].add(plan_cell.mark_set_id)
     for (emp_id, _work_date), fact in ctx.fact_cells.items():
         if emp_id in pairs:
             pairs[emp_id].add(fact.mark_set_id)
@@ -793,6 +793,22 @@ class MarkSetForbiddenError(PlanningError):
 
 class NoExecutorError(PlanningError):
     """У шифра не назначен исполнитель — планировать некого."""
+
+
+def _executor_of(mark_set: MarkSetRow) -> int:
+    """Исполнитель шифра в контуре записи — гарантированно число.
+
+    _load_operation_mark_sets уже отказал (NoExecutorError) для шифров
+    без исполнителя, так что None здесь невозможен. Функция делает эту
+    гарантию видимой: тип int говорит и читателю, и mypy, что исполнитель
+    есть. Если однажды загрузчик изменят и гарантия пропадёт, ошибка
+    будет понятной, а не TypeError где-то в глубине записи.
+    """
+    if mark_set.id_executor is None:
+        raise NoExecutorError(
+            f"У шифра {mark_set.marka_full} не назначен исполнитель"
+        )
+    return mark_set.id_executor
 
 
 @dataclass(frozen=True, slots=True)
@@ -1034,7 +1050,7 @@ def _validate_operations(
     из-за ячейки, которую сама же пачка и удаляет.
     """
     rejections: list[RejectedOperation] = []
-    seen: set[tuple[int, date]] = set()
+    seen: set[tuple[str, int, date]] = set()
 
     # Что освобождают удаления этой же пачки. Два среза: по паре
     # «шифр + дата» — для правила «дата шифра одна», и по паре
@@ -1058,11 +1074,7 @@ def _validate_operations(
         # «шифр + дата», и они законны. Противоречием остаётся только
         # буквальный дубль: два add или два remove подряд.
         dup_key = (operation.op, operation.mark_set_id, operation.work_date)
-        if dup_key in seen:
-
-        # Повтор пары «шифр + дата» в одной пачке. Клиент прислал либо
-        # дубль, либо add и remove на одну ячейку — в обоих случаях его
-        # состояние противоречиво, и угадывать намерение мы не станем.        
+        if dup_key in seen:       
             rejections.append(
                 RejectedOperation(
                     mark_set_id=operation.mark_set_id,
@@ -1098,13 +1110,15 @@ def _validate_operations(
                 continue
             # Исполнитель выводится из шифра, а не из запроса: подмена
             # id не позволит запланировать работу чужому человеку.
-            employee_id = mark_set.id_executor
+            employee_id = _executor_of(mark_set)
 
             # Правило «дата шифра планируется один раз». Проверяется
-            # раньше вердикта: две записи об одном дне работы означали
-            # бы двойной счёт трудозатрат, и это важнее того, свободен
-            # ли день у самого исполнителя.
-            if occupied:
+            # раньше вердикта: две записи об одном дне работы означали бы
+            # двойной счёт трудозатрат, и это важнее того, свободен ли
+            # день у самого исполнителя.
+            # occupant is not None уже входит в occupied; повторено явно,
+            # чтобы проверка была видна и читателю, и mypy.
+            if occupied and occupant is not None:
                 owner = ctx.employees.get(occupant[0])
                 rejections.append(
                     RejectedOperation(
@@ -1215,7 +1229,7 @@ async def apply_changes(
     )
 
     employee_ids = sorted(
-        {mark_set.id_executor for mark_set in mark_sets.values()}
+        {_executor_of(mark_set) for mark_set in mark_sets.values()}
         | {owner for owner, _plan_id in occupancy.values()}
     )
 
@@ -1241,7 +1255,7 @@ async def apply_changes(
         if operation.op == "add":
             key = (
                 operation.mark_set_id,
-                mark_sets[operation.mark_set_id].id_executor,
+                _executor_of(mark_sets[operation.mark_set_id]),
             )
             added.setdefault(key, []).append(operation.work_date)
         else:

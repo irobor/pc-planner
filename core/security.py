@@ -1,6 +1,6 @@
 # app/core/security.py
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, TypeGuard
 
 from jose import jwt
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -23,7 +23,7 @@ _FORBIDDEN_NEXT: frozenset[str] = frozenset({"/login", "/logout"})
 ADMIN_ROLE: str = "admin"
 
 
-def is_safe_next(next_path: str | None) -> bool:
+def is_safe_next(next_path: str | None) -> TypeGuard[str]:
     """Проверяет, что next_path — безопасный локальный путь для редиректа.
 
     Защищает от open-redirect: внешние и протокол-относительные URL
