@@ -31,6 +31,12 @@
     Исполнитель не числится в подразделении этой марки.
   {% elif error_code == "status" %}
     Указан неизвестный статус.
+  {% elif error_code == "released" %}
+    Выпущенный шифр удалить нельзя: документ сдан заказчику.
+  {% elif error_code == "has_plan" %}
+    У шифра есть план. Снимите плановые дни в «Загрузке», затем удаляйте.
+  {% elif error_code == "has_fact" %}
+    По шифру уже отмечена работа. Шифр с фактом удаляет только администратор данных.  
   {% else %}
     Не удалось создать шифр.
   {% endif %}
@@ -294,6 +300,19 @@
         </div>
 
         <div class="modal-footer">
+          {# Удаление — отдельной командой, слева и отдельно от «Сохранить»:
+             правка обратима, удаление нет, и кнопки рядом рано или поздно
+             нажимают по ошибке. me-auto прижимает кнопку влево.
+
+             Та же форма, другой адрес: formaction подставляет скрипт при
+             открытии карточки. formnovalidate — чтобы очищенное поле шифра
+             (required) не блокировало удаление. Поля правки при этом тоже
+             уходят на сервер, роут удаления их не читает.
+
+             Кнопка видна всегда: можно ли удалять (план, факт, статус),
+             решает сервер и объясняет отказ сообщением. #}
+          <button type="submit" class="btn btn-outline-danger me-auto"
+                  id="editSetDelete" formnovalidate>Удалить</button>
           <button type="button" class="btn btn-secondary"
                   data-bs-dismiss="modal">Отмена</button>
           <button type="submit" class="btn btn-primary">Сохранить</button>
@@ -457,6 +476,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const isTask = document.getElementById('editIsTask');
     const recipientWrap = document.getElementById('editRecipientWrap');
     const recipientSelect = document.getElementById('editRecipient');
+    const deleteButton = document.getElementById('editSetDelete');
 
     modal.addEventListener('show.bs.modal', function (event) {
         const row = event.relatedTarget;
@@ -471,6 +491,10 @@ document.addEventListener('DOMContentLoaded', function () {
         form.action = '{{ "/planner/works/" ~ project.id ~ "/sets/" }}'
             + data.setId;
 
+        // Удаление — та же форма, свой адрес. Шифр запоминаем для текста
+        // подтверждения: пользователь должен видеть, ЧТО удаляет.
+        deleteButton.formAction = form.action + '/delete';
+        deleteButton.dataset.markaFull = data.markaFull;
         markaText.textContent = data.markaLabel;
         markaFull.value = data.markaFull;
         statusSelect.value = data.statusId;
@@ -501,7 +525,15 @@ document.addEventListener('DOMContentLoaded', function () {
         recipientSelect.value = data.recipientId || '';
         recipientWrap.classList.toggle('d-none', !hasRecipient);
     });
-
+    // Подтверждение удаления. Штатный confirm(), а не вторая модалка
+    // поверх первой: Bootstrap вложенные модалки поддерживает плохо.
+    deleteButton.addEventListener('click', function (event) {
+        const question = 'Удалить шифр ' + deleteButton.dataset.markaFull
+            + '?\nДействие необратимо.';
+        if (!window.confirm(question)) {
+            event.preventDefault();
+        }
+    });    
     // «Сменить» заменяет текст полем выбора. Обратной кнопки нет: раз
     // начальник нажал, он собирается менять, а отказаться можно кнопкой
     // «Отмена» внизу карточки.

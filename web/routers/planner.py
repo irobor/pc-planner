@@ -14,7 +14,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import exists, func, select
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
@@ -27,7 +27,7 @@ from app.models.composition import Department, ProjectComposition, ProjectMarkSe
 from app.models.employee import Employee, EmployeeAssignment
 from app.models.project import Project
 from app.models.user import User
-from app.models.planning import WorkPlan
+from app.models.planning import FactCalendarCell, PlanCalendarCell, WorkPlan
 from app.web.templates import templates
 
 
@@ -40,6 +40,9 @@ SET_MANAGE_PERMISSION = "set:manage"
 # Новый шифр всегда стартует с «В плане»: работа ещё не начата, плана
 # может не быть вовсе (назначение отделено от планирования).
 STATUS_SET_PLANNED = 1
+# set_statuses: 4 «Выпущен» — документ сдан заказчику. Такой шифр не
+# удаляется никогда: это уже не черновая запись, а факт выпуска.
+STATUS_SET_RELEASED = 4
 # Право на просмотр плана. Есть у обоих начальников, инженера, ГИПа и
 # начальника ПЦ; нет у табельщицы и registry_editor — им планировщик
 # не нужен, и пункт меню у них скрыт тем же правом.
@@ -639,6 +642,120 @@ async def planner_update_set(
 
     return _back(project_id, mark_set.composition_id, None)
 
+
+@router.post(
+    "/planner/works/{project_id}/sets/{set_id}/delete",
+    tags=["Web Планировщик"],
+    summary="Удаление ошибочно заведённого шифра",
+)
+async def planner_delete_set(
+    project_id: int,
+    set_id: int,
+    user: Annotated[User, Depends(RequirePermissionHtml(SET_MANAGE_PERMISSION))],
+    scope: Annotated[Scope, Depends(get_scope_html)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RedirectResponse:
+    """Удаляет шифр, по которому ничего не делалось.
+
+    Удалять можно только ошибочно заведённый шифр: без плана, без факта и
+    не выпущенный. Всё остальное — через статус «Выпущен» или, в будущем,
+    через администратора данных.
+
+    Внешние ключи work_plan и fact_calendar_cells на шифр — CASCADE, и это
+    решение сохраняется: администратору понадобится удалять шифры вместе
+    с историей одной операцией. Поэтому запрет «план и факт не трогать»
+    держит этот роут, а не схема.
+    """
+    # 1. Шифр существует в этом проекте — и СРАЗУ блокируется FOR UPDATE.
+    #
+    #    Зачем блокировка. Между проверкой «факта нет» (шаг 5) и DELETE
+    #    инженер может поставить отметку, и каскад унёс бы её молча.
+    #    Вставка в fact_calendar_cells и в work_plan проверяет внешний
+    #    ключ, беря на строку шифра FOR KEY SHARE — а она конфликтует с
+    #    нашим FOR UPDATE. Конкурент дождётся конца транзакции и получит
+    #    ошибку внешнего ключа (шифра уже нет) вместо тихой потери.
+    #
+    #    of=ProjectMarkSet: блокируем только шифр, строку состава — нет.
+    mark_set = (
+        await db.execute(
+            select(ProjectMarkSet)
+            .join(
+                ProjectComposition,
+                ProjectComposition.id == ProjectMarkSet.composition_id,
+            )
+            .where(
+                ProjectMarkSet.id == set_id,
+                ProjectComposition.project_id == project_id,
+            )
+            .with_for_update(of=ProjectMarkSet)
+        )
+    ).scalar_one_or_none()
+
+    if mark_set is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Шифр не найден",
+        )
+
+    # Нужен для редиректа: после DELETE объект читать уже нельзя.
+    composition_id = mark_set.composition_id
+
+    # 2. Область управления. Строка шифра чужого бюро не кликабельна, но
+    #    форму можно отправить и напрямую.
+    department_id = (
+        await db.execute(
+            select(ProjectComposition.department_id).where(
+                ProjectComposition.id == composition_id
+            )
+        )
+    ).scalar_one()
+
+    if not scope.can_manage(department_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Подразделение вне вашей области управления",
+        )
+
+    # 3. Выпущенный шифр — документ, сданный заказчику. Не удаляется
+    #    никогда, ни с историей, ни без.
+    if mark_set.status_id == STATUS_SET_RELEASED:
+        return _back(project_id, composition_id, "released")
+
+    # 4. План. Проверяем ячейки, а не строки work_plan: владелец истины
+    #    плана — plan_calendar_cells, work_plan производный. Пустой
+    #    work_plan без ячеек планом не считается и уйдёт каскадом.
+    has_plan = (
+        await db.execute(
+            select(PlanCalendarCell.id)
+            .join(WorkPlan, WorkPlan.id == PlanCalendarCell.work_plan_id)
+            .where(WorkPlan.mark_set_id == set_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if has_plan is not None:
+        return _back(project_id, composition_id, "has_plan")
+
+    # 5. Факт — свидетельство инженера о своей работе, восстановить его
+    #    неоткуда. Шифр с фактом удаляет только администратор данных.
+    has_fact = (
+        await db.execute(
+            select(FactCalendarCell.id)
+            .where(FactCalendarCell.mark_set_id == set_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if has_fact is not None:
+        return _back(project_id, composition_id, "has_fact")
+
+    # 6. Удаление. Core-запросом, а не session.delete(): ORM-удаление
+    #    стало бы разбирать связи объекта (коллекцию mark_sets у строки
+    #    состава), а каскад по работе и факту и так делает база.
+    await db.execute(delete(ProjectMarkSet).where(ProjectMarkSet.id == set_id))
+    await db.commit()
+
+    return _back(project_id, composition_id, None)
 
 
 async def _load_manageable_departments(
