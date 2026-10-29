@@ -28,7 +28,7 @@ varchar(20), а не integer, выбран потому, что ведущий �
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import CheckConstraint,  Date, DateTime, ForeignKey, String
+from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -188,3 +188,25 @@ class EmployeeAssignment(Base):
             f"department_id={self.department_id!r}, "
             f"valid_from={self.valid_from!r}, valid_to={self.valid_to!r})"
         )
+
+
+
+class Position(Base):
+    """Справочник должностей. Таблица кадрового контура Flask.
+
+    Наш контур только читает её: название должности показывается в меню
+    пользователя (app/core/assignments.py). Поля — строго по DDL;
+    rank нужен Flask для порядка согласования, здесь не используется.
+    Связь (relationship) с EmployeeAssignment не заведена: единственный
+    запрос делает явный JOIN, а связь, которой никто не пользуется, —
+    лишний код.
+    """
+
+    __tablename__ = "positions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    rank: Mapped[int] = mapped_column(nullable=False)
+
+    def __repr__(self) -> str:
+        return f"Position(id={self.id!r}, name={self.name!r})"

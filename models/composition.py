@@ -400,8 +400,10 @@ class SetStatus(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Цвет бейджа в интерфейсе. Хранится в справочнике, чтобы менять
-    # оформление статусов без правки шаблонов.
+    # Колонка есть в DDL, но не используется ни FastAPI, ни Flask: цвет
+    # статуса задаётся в static/css/style.css (--status-N), потому что
+    # подставить его из базы можно только запрещённым inline-стилем.
+    # Хранит прежнюю палитру — ориентироваться на неё не нужно.
     color: Mapped[Optional[str]] = mapped_column(String(20))
 
     # Порядок отображения в списках. server_default, а не default:

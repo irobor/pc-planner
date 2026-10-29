@@ -21,7 +21,7 @@ def _deny_all(permission_name: str) -> bool:
 
 
 def inject_user_context(request: Request) -> dict:
-    """Context-processor: добавляет user и can в каждый шаблон.
+    """Context-processor: добавляет user, can и user_card в каждый шаблон.
 
     В контекст уходит функция проверки, а не плоский список прав:
     список нельзя было бы согласовать с обходом для роли admin, не
@@ -34,7 +34,12 @@ def inject_user_context(request: Request) -> dict:
     # чтобы шаблон не проверял user на None перед каждым вызовом.
     can = user.can if user is not None else _deny_all
 
-    return {"user": user, "can": can}
+    # Карточку (должность, подразделение) кладёт require_user_html. Ключ
+    # отдаём всегда, хотя бы None: шаблоны в режиме StrictUndefined, и
+    # страница без гарда иначе падала бы на обращении к user_card.
+    user_card = getattr(request.state, "user_card", None)
+
+    return {"user": user, "can": can, "user_card": user_card}
 
 
 # context_processors принимает список синхронных Callable[[Request], dict].

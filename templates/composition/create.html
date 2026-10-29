@@ -1,15 +1,15 @@
-{% extends "layouts/app.html" %}
+{% extends "layouts/planning.html" %}
 
 {% block title %}Создание состава проекта{% endblock %}
 
-{% block content %}
+{% block section_content %}
 <div class="row">
   <div class="col">
 
     {# Шапка: возврат к списку составов + общий заголовок (проект ещё #}
     {# не выбран, конкретного шифра в заголовке нет — решение B2-Q4). #}
     <div class="mb-3">
-      <a href="/project-composition"
+      <a href="/planner/composition"
          class="btn btn-outline-secondary btn-sm mb-2">
         &larr; К списку составов
       </a>

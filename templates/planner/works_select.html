@@ -1,15 +1,11 @@
-{% extends "layouts/section.html" %}
+{% extends "layouts/planning.html" %}
 
-{% block title %}Работы бюро{% endblock %}
+{% block title %}Бюро{% endblock %}
 
-{% block sidebar %}
-  {{ nav_item("/planner/works", "Работы") }}
-  {{ nav_item("/planner/workload", "Загрузка") }}
-  {{ nav_item("/planner/employees", "Сотрудники") }}
-{% endblock %}
+
 
 {% block section_content %}
-<h1 class="h4 mb-3">Работы бюро</h1>
+<h1 class="h4 mb-3">Бюро</h1>
 
 {% if projects %}
   <p class="text-muted">Выберите состав проекта:</p>

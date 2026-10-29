@@ -1,8 +1,8 @@
-{% extends "layouts/app.html" %}
+{% extends "layouts/planning.html" %}
 
 {% block title %}Состав проекта{% endblock %}
 
-{% block content %}
+{% block section_content %}
 <div class="row">
   <div class="col">
     {# Шапка: заголовок слева, кнопка создания справа (flex). Кнопка #}
@@ -12,7 +12,7 @@
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h1 class="h3 mb-0">Состав проекта</h1>
       {% if can("composition:manage") %}
-      <a href="/project-composition/new" class="btn btn-primary">
+      <a href="/planner/composition/new" class="btn btn-primary">
         + Создать состав
       </a>
       {% endif %}
@@ -32,9 +32,9 @@
         {% for project in projects %}
         <tr>
           {# Шифр — ссылка на дерево состава проекта. Роут существует #}
-          {# (GET /project-composition/{id}), поэтому ссылка активна. #}
+          {# (GET /planner/composition/{id}), поэтому ссылка активна. #}
           <td>
-            <a href="/project-composition/{{ project.id }}">
+            <a href="/planner/composition/{{ project.id }}">
               {{ project.code }}
             </a>
           </td>

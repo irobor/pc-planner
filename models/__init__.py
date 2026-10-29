@@ -37,7 +37,8 @@ from app.models.user import (  # noqa: F401
 # EmployeeAssignment: темпоральная таблица, на которой стоит область
 # управления (app/core/scope.py). В БД у неё есть EXCLUDE-ограничение
 # employee_assignments_no_overlap, невидимое для SQLAlchemy и Alembic.
-from app.models.employee import Employee, EmployeeAssignment  # noqa: F401
+# Position: справочник должностей (таблица Flask, читаем для меню пользователя).
+from app.models.employee import Employee, EmployeeAssignment, Position  # noqa: F401
 
 # Модель боевой таблицы projects (read-only для нашего контура).
 from app.models.project import Project  # noqa: F401
@@ -83,6 +84,7 @@ __all__ = [
     "Permission",
     "Employee",
     "EmployeeAssignment",
+    "Position",
     "user_roles",
     "role_permissions",
     "Project",

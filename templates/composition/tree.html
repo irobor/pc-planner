@@ -1,4 +1,4 @@
-{% extends "layouts/app.html" %}
+{% extends "layouts/planning.html" %}
 
 {% block title %}Состав проекта {{ project.code }}{% endblock %}
 {# Дерево состава шире обычной страницы, но не во весь экран: это
@@ -22,7 +22,7 @@
 {# ------------------------------------------------------------------ #}
 {% import "composition/_tree_macro.html" as tree_macro %}
 
-{% block content %}
+{% block section_content %}
 <div class="row">
   <div class="col">
 
@@ -30,7 +30,7 @@
     {# редактирование (кнопка пока неактивна — форма будет частью 2). #}
     <div class="d-flex justify-content-between align-items-center mb-3">
       <div>
-        <a href="/project-composition" class="btn btn-outline-secondary btn-sm mb-2">
+        <a href="/planner/composition" class="btn btn-outline-secondary btn-sm mb-2">
           &larr; К списку составов
         </a>
         <h1 class="h3 mb-0">
@@ -45,10 +45,10 @@
       {# на корзину текущего проекта. #}
       {% if can("composition:manage") %}
       <div class="d-flex gap-2">
-        <a href="/project-composition/new" class="btn btn-outline-primary">
+        <a href="/planner/composition/new" class="btn btn-outline-primary">
           + Создать состав
         </a>
-        <a href="/project-composition/{{ project.id }}/edit" class="btn btn-primary">
+        <a href="/planner/composition/{{ project.id }}/edit" class="btn btn-primary">
           Редактировать состав
         </a>
       </div>

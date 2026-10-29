@@ -4,8 +4,10 @@ from urllib.parse import urlencode
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_optional_user
+from app.core.assignments import get_user_card
+from app.core.dependencies import get_db, get_optional_user
 from app.core.security import is_safe_next
 from app.models.user import User
 
@@ -25,12 +27,13 @@ class RedirectToLogin(Exception):
 async def require_user_html(
     request: Request,
     user: Annotated[Optional[User], Depends(get_optional_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
-    """Гард защищённых HTML-страниц: проверка входа + пометка под no-store.
+    """Гард защищённых HTML-страниц: проверка входа, no-store, карточка.
 
     Гость (user is None) → RedirectToLogin с текущим путём.
-    Вошедший → ставим флаг no_store (его прочитает middleware) и
-    возвращаем user, чтобы роут получил его для шаблона.
+    Вошедший → ставим флаг no_store (его прочитает middleware), кладём
+    карточку для меню пользователя и возвращаем user для шаблона.
     """
     if user is None:
         # Путь страницы станет ?next=, чтобы вернуть сюда после входа.
@@ -39,6 +42,13 @@ async def require_user_html(
     # Флаг читается no_store_middleware уже на этапе ответа.
     # Ставится ТОЛЬКО для защищённых страниц — статика сюда не заходит.
     request.state.no_store = True
+
+    # Должность и подразделение для меню в шапке. Запрос здесь, а не в
+    # get_optional_user: через этот гард идут только HTML-страницы, у
+    # которых есть шапка. JSON-API за карточкой не ходит, и сбой в
+    # кадровых таблицах Flask не задевает авторизацию API. Сессия та же,
+    # что у get_optional_user: FastAPI кэширует get_db в пределах запроса.
+    request.state.user_card = await get_user_card(db, user)
     return user
 
 

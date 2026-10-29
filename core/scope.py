@@ -38,6 +38,7 @@ from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.assignments import is_current_assignment
 from app.core.dependencies import get_current_user, get_db
 from app.core.guards import require_user_html
 from app.models.composition import Department
@@ -102,15 +103,11 @@ async def get_user_department_id(db: AsyncSession, user: User) -> Optional[int]:
     today = date.today()
 
     stmt = (
-        select(EmployeeAssignment.department_id)
-        .where(
+        select(EmployeeAssignment.department_id).where(
             EmployeeAssignment.employee_id == user.employee.id,
-            EmployeeAssignment.valid_from <= today,
-            # NULL в valid_to = назначение открыто. Условие пишем через
-            # is_(None), а не == None: SQLAlchemy требует именно так,
-            # и flake8 (E711) ругается на сравнение с None оператором.
-            (EmployeeAssignment.valid_to.is_(None))
-            | (EmployeeAssignment.valid_to >= today),
+            # Правило актуальности (включительная граница valid_to) —
+            # одно на проект, в app/core/assignments.py.
+            is_current_assignment(today),
         )
         # Индекс idx_assignments_employee (employee_id, valid_from)
         # покрывает выборку целиком.

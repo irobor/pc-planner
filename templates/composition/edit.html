@@ -1,14 +1,14 @@
-{% extends "layouts/app.html" %}
+{% extends "layouts/planning.html" %}
 
 {% block title %}Редактирование состава {{ project.code }}{% endblock %}
 
-{% block content %}
+{% block section_content %}
 <div class="row">
   <div class="col">
 
     {# Шапка по образцу tree.html: возврат к дереву + заголовок проекта. #}
     <div class="mb-3">
-      <a href="/project-composition/{{ project.id }}"
+      <a href="/planner/composition/{{ project.id }}"
          class="btn btn-outline-secondary btn-sm mb-2">
         &larr; К дереву состава
       </a>

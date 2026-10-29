@@ -56,8 +56,8 @@ EDIT_PERMISSION = "composition:manage"    # было registry:project_compositio
 
 
 # ---------------------------------------------------------------------------
-# КРИТИЧНО — ПОРЯДОК: этот эндпоинт (/project-composition/new) должен быть
-# объявлен РАНЬШЕ динамического /project-composition/{project_id}
+# КРИТИЧНО — ПОРЯДОК: этот эндпоинт (/planner/composition/new) должен быть
+# объявлен РАНЬШЕ динамического /planner/composition/{project_id}
 # (project_composition_tree). Иначе "new" уйдёт в {project_id} как
 # project_id="new" → FastAPI попытается int("new") → 422, а /new станет
 # недостижим. Ставь его ВЫШЕ функции project_composition_tree в файле.
@@ -69,7 +69,7 @@ EDIT_PERMISSION = "composition:manage"    # было registry:project_compositio
 
 
 @router.get(
-    "/project-composition/new",
+    "/planner/composition/new",
     response_class=HTMLResponse,
     tags=["Web Состав проекта"],
     summary="Страница создания состава проекта (ввод шифра, вход B)",
@@ -103,7 +103,7 @@ async def project_composition_create_page(
 
 
 @router.get(
-    "/project-composition",
+    "/planner/composition",
     response_class=HTMLResponse,
     tags=["Web Состав проекта"],
     summary="Список проектов с заполненным составом",
@@ -156,7 +156,7 @@ async def project_composition_page(
     )
 
 @router.get(
-    "/project-composition/{project_id}",
+    "/planner/composition/{project_id}",
     response_class=HTMLResponse,
     tags=["Web Состав проекта"],
     summary="Дерево состава конкретного проекта",
@@ -286,7 +286,7 @@ async def project_composition_tree(
 
 
 @router.get(
-    "/project-composition/{project_id}/edit",
+    "/planner/composition/{project_id}/edit",
     response_class=HTMLResponse,
     tags=["Web Состав проекта"],
     summary="Страница-редактор состава проекта (React-корзина)",

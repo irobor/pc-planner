@@ -5,9 +5,10 @@
    Наследуют её только страницы разделов, где экранов БОЛЬШЕ ОДНОГО:
    сайдбар из единственного пункта не сообщает ничего.
 
-   Дочерний шаблон заполняет два блока:
-     sidebar         — пункты меню раздела (см. макрос nav_item ниже);
-     section_content — содержимое экрана.
+   Наследники — в два уровня:
+     оболочка раздела (layouts/planning.html …) — заполняет sidebar,
+       пункты меню раздела записаны там один раз (макрос nav_item ниже);
+     страница раздела — наследует оболочку и заполняет section_content.
 
    Пункты описываются в шаблоне раздела, а не в Python: пока разделов
    четыре, а экранов внутри максимум три, отдельный модуль навигации был
@@ -21,28 +22,60 @@
    независимо от экрана и от того, какой раздел открыт. #}
 
 {# ------------------------------------------------------------------ #}
-{# Пункт бокового меню. Активность — по ПОЛНОМУ совпадению пути (в       #}
-{# отличие от яруса 1, где сравнивается только первый сегмент): экраны   #}
-{# внутри раздела различаются именно хвостом адреса.                     #}
+{# Пункт бокового меню. Активен на своём адресе и на вложенных экранах:  #}
+{# /planner/composition подсвечен и на /planner/composition/15. Косая    #}
+{# черта в условии обязательна — без неё /planner/works совпал бы с      #}
+{# любым адресом, который просто начинается теми же буквами.             #}
 {#                                                                       #}
+{# Значок необязателен: icon — имя файла в templates/icons/ без .svg.  #}
+{# SVG вставляется кодом, а не <img>: так он рисуется цветом текста     #}
+{# (currentColor) и темнеет вместе с подписью у активного пункта.       #}
+{# aria-hidden — значок оформительский, диктор читает только подпись.   #}
+{#      
+{# data-label — текст подсказки свёрнутого меню (CSS, attr()); подпись  #}
+{# в .nav-label в свёрнутом виде скрыта визуально, но читается диктором. #}
+{#                                                                       #}                                                                 #}
 {# Использование в блоке sidebar:                                        #}
-{#     {{ nav_item("/planner/works", "Работы") }}                        #}
+{#     {{ nav_item("/planner/works", "Бюро", icon="users") }}           #}
 {# ------------------------------------------------------------------ #}
-{% macro nav_item(href, label) %}
+{% macro nav_item(href, label, icon=None) %}
 <li class="nav-item">
-  <a class="nav-link{% if request.url.path == href %} active{% endif %}"
-     href="{{ href }}">{{ label }}</a>
+  <a class="nav-link d-flex align-items-center gap-2{% if request.url.path == href
+                           or request.url.path.startswith(href ~ '/') %} active{% endif %}"
+     href="{{ href }}" data-label="{{ label }}">
+    {%- if icon %}<span class="nav-icon" aria-hidden="true">{% include "icons/" ~ icon ~ ".svg" %}</span>{% endif -%}
+    <span class="nav-label">{{ label }}</span></a>
 </li>
 {% endmacro %}
 
 {% block content %}
-<div class="d-flex flex-column flex-lg-row section-layout">
+{# Свёрнутость меню — из cookie: сервер сразу отдаёт нужный вид, и при
+   переходе между страницами меню не «прыгает». Пишет cookie
+   static/js/sidebar.js по клику на кнопку. На узком экране сворачивания
+   нет: меню там и так стоит строкой над содержимым (см. style.css). #}
+{% set sidebar_collapsed = request.cookies.get("sidebar_collapsed") == "1" %}
+<div class="d-flex flex-column flex-lg-row section-layout{% if sidebar_collapsed %} section-layout--collapsed{% endif %}">
 
   {# Боковое меню. Ниже lg встаёт над содержимым и занимает всю ширину:
      отдельного offcanvas не заводим — пунктов мало, и лишний
      JS-компонент того не стоит. #}
-  <nav class="section-sidebar-col mb-3 mb-lg-0">
-    <ul class="nav nav-pills flex-lg-column section-sidebar">
+  <nav class="section-sidebar-col mb-3 mb-lg-0" aria-label="Меню раздела">
+    {# Кнопка — только значок: подпись для диктора скрыта визуально,
+       название показывает подсказка (CSS, data-label). #}
+    {% set toggle_label = "Развернуть меню" if sidebar_collapsed else "Свернуть меню" %}
+    <div class="section-sidebar-toggle-row d-none d-lg-flex">
+      <button type="button" class="section-sidebar-toggle"
+              aria-controls="section-sidebar"
+              aria-expanded="{{ 'false' if sidebar_collapsed else 'true' }}"
+              data-label="{{ toggle_label }}"
+              data-label-collapse="Свернуть меню"
+              data-label-expand="Развернуть меню">
+        <span class="nav-icon section-sidebar-toggle__close" aria-hidden="true">{% include "icons/panel-left-close.svg" %}</span>
+        <span class="nav-icon section-sidebar-toggle__open" aria-hidden="true">{% include "icons/panel-left-open.svg" %}</span>
+        <span class="visually-hidden section-sidebar-toggle__label">{{ toggle_label }}</span>
+      </button>
+    </div>
+    <ul id="section-sidebar" class="nav nav-pills flex-lg-column section-sidebar">
       {% block sidebar %}{% endblock %}
     </ul>
   </nav>
@@ -56,4 +89,9 @@
   </div>
 
 </div>
+
+{# Скрипт кнопки — здесь, а не в блоке extra_js: страницы раздела
+   заполняют extra_js своими бандлами и затёрли бы его. defer — выполнить
+   после разбора страницы, не задерживая отрисовку. #}
+<script src="/static/js/sidebar.js" defer></script>
 {% endblock %}

@@ -1,14 +1,9 @@
-{% extends "layouts/section.html" %}
+{% extends "layouts/planning.html" %}
 {% import "planner/_tree_table.html" as tree_table %}
 
-{% block title %}Работы бюро — {{ project.code }}{% endblock %}
+{% block title %}Бюро — {{ project.code }}{% endblock %}
 
 
-{% block sidebar %}
-  {{ nav_item("/planner/works", "Работы") }}
-  {{ nav_item("/planner/workload", "Загрузка") }}
-  {{ nav_item("/planner/employees", "Сотрудники") }}
-{% endblock %}
 
 {% block section_content %}
 
@@ -34,7 +29,7 @@
   {% elif error_code == "released" %}
     Выпущенный шифр удалить нельзя: документ сдан заказчику.
   {% elif error_code == "has_plan" %}
-    У шифра есть план. Снимите плановые дни в «Загрузке», затем удаляйте.
+    У шифра есть план. Снимите плановые дни на экране «План», затем удаляйте.
   {% elif error_code == "has_fact" %}
     По шифру уже отмечена работа. Шифр с фактом удаляет только администратор данных.  
   {% else %}
@@ -46,7 +41,7 @@
 {% endif %}
 
 
-<h1 class="h4 mb-3">Работы бюро</h1>
+<h1 class="h4 mb-3">Бюро</h1>
 
 {# Панель фильтров. Форма GET: выбор состава и статуса уходит в строку
    запроса, поэтому состояние экрана видно в адресе и им можно

@@ -1,18 +1,13 @@
 {# app/templates/planner/workload.html #}
-{% extends "layouts/section.html" %}
+{% extends "layouts/planning.html" %}
 
-{% block title %}Загрузка бюро{% endblock %}
+{% block title %}План бюро{% endblock %}
 
-{% block sidebar %}
-  {{ nav_item("/planner/works", "Работы") }}
-  {{ nav_item("/planner/workload", "Загрузка") }}
-  {{ nav_item("/planner/employees", "Сотрудники") }}
-{% endblock %}
 
 {% block section_content %}
 
 <div class="d-flex align-items-center justify-content-between mb-3">
-  <h1 class="h4 mb-0">Загрузка бюро</h1>
+  <h1 class="h4 mb-0">План бюро</h1>
 
   {# Выбор подразделения — обычная GET-форма без JS: смена бюро меняет
      адрес, и страница со ссылкой остаётся воспроизводимой (можно

@@ -130,6 +130,26 @@ class User(Base):
             return self.employee.full_name
         return self.username
 
+    @property
+    def short_name(self) -> str:
+        """Короткое имя для шапки: «Иванов Иван Иванович» → «Иванов И. И.».
+
+        Фамилия целиком (двойная через дефис — одно слово), из следующих
+        двух слов — первая буква с точкой. Слова дальше третьего
+        отбрасываются («Мамедов Рашид Али оглы» → «Мамедов Р. А.»).
+        Правило рассчитано на полную запись ФИО, как в боевой БД.
+
+        Служебная учётка без карточки — логин, как в display_name.
+        """
+        parts = self.employee.full_name.split() if self.employee else []
+        # Пустое ФИО — ошибка данных, но шапка из-за неё падать не должна:
+        # такую учётку показываем логином, как служебную.
+        if not parts:
+            return self.username
+        surname, *names = parts
+        initials = [f"{name[0]}." for name in names[:2]]
+        return " ".join([surname, *initials])
+
 
 class Role(Base):
     __tablename__ = "roles"

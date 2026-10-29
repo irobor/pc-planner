@@ -5,13 +5,15 @@
    Наследуется всеми рабочими страницами.
 
    Навигация двухъярусная:
-     ярус 1 (здесь)         — РАЗДЕЛЫ приложения: Главная, Состав,
-                              Планировщик, Администрирование;
+     ярус 1 (здесь)         — РАЗДЕЛЫ приложения: Планирование,
+                              Администрирование; справа — личное: Мой
+                              факт и меню пользователя. На главную ведёт
+                              логотип — отдельного пункта нет;
      ярус 2 (section.html)  — ЭКРАНЫ внутри раздела, боковой панелью.
    Раздел с единственным экраном второй ярус не рисует — прятать нечего. #}
 
 {# Прижатый футер: флекс-колонка на всю высоту вьюпорта. #}
-{% block body_class %}bg-light d-flex flex-column min-vh-100{% endblock %}
+{% block body_class %}d-flex flex-column min-vh-100{% endblock %}
 
 {# Активный раздел определяется по ПЕРВОМУ сегменту пути, а не по полному
    совпадению: внутри раздела адрес меняется (/planner/works,
@@ -20,9 +22,13 @@
 {% set section = request.url.path.split('/')[1] if request.url.path != '/' else '' %}
 
 {% block body %}
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
-        <div class="container">
-            <a class="navbar-brand" href="/">УОЛМ</a>
+    <nav class="navbar navbar-expand-lg border-bottom mb-4">
+        {# container-fluid px-4 — те же поля, что у <main>: логотип стоит
+           над левым краем содержимого, а не сжат к центру. #}
+        <div class="container-fluid px-4">
+            <a class="navbar-brand py-0" href="/">
+                <img src="/static/img/logo.svg" alt="PlanX" width="115" height="28">
+            </a>
             <button class="navbar-toggler" type="button"
                     data-bs-toggle="collapse" data-bs-target="#navbarNav"
                     aria-controls="navbarNav" aria-expanded="false"
@@ -35,35 +41,15 @@
                    показывать нельзя. Проверка через инъектор can() — тот же
                    User.can(), что и на сервере, поэтому меню и бэкенд судят
                    по одному правилу. #}
-                <ul class="navbar-nav me-auto">
-                    <li class="nav-item">
-                        <a class="nav-link{% if section == '' %} active{% endif %}"
-                           href="/">Главная</a>
-                    </li>
-                        {# Мой факт — ежедневная отметка инженера, поэтому сразу
-                       после «Главной». Два условия: право и кадровая
-                       карточка. Администратор проходит can() через обход,
-                       но у служебной учётки карточки нет — пункт вёл бы на
-                       экран с пояснением вместо матрицы. #}
-                    {% if can("fact:own") and user.employee %}
-                    <li class="nav-item">
-                        <a class="nav-link{% if section == 'fact' %} active{% endif %}"
-                           href="/fact">Мой факт</a>
-                    </li>
-                    {% endif %}
-                    {% if can("composition:view") %}
-                    <li class="nav-item">
-                        <a class="nav-link{% if section == 'project-composition' %} active{% endif %}"
-                           href="/project-composition">Состав проектов</a>
-                    </li>
-                    {% endif %}
-
-                    {# Планировщик — под правом просмотра плана. Начальники
-                       и инженеры его имеют, табельщица и registry_editor — нет. #}
+                <ul class="navbar-nav me-auto">                    
+                    {# Планирование — работы, загрузка и состав проектов (меню
+                       раздела — layouts/planning.html). Под правом просмотра
+                       плана: начальники и инженеры его имеют, табельщица и
+                       registry_editor — нет. #}
                     {% if can("plan:view") %}
                     <li class="nav-item">
                         <a class="nav-link{% if section == 'planner' %} active{% endif %}"
-                           href="/planner/works">Планировщик</a>
+                           href="/planner/workload">Планирование</a>
                     </li>
                     {% endif %}
                     {# Администрирование — правка плана и факта без ограничений
@@ -79,27 +65,53 @@
                     {% endif %}
                 </ul>
 
-                {# Пользователь и выход. display_name — фасад над разделённой
-                   идентичностью: ФИО работника, а для служебных учёток логин. #}
+                {# Меню пользователя. В переключателе короткое имя, в меню —
+                   полное ФИО, должность и подразделение. short_name и
+                   display_name — фасады над разделённой идентичностью: у
+                   служебной учётки вместо ФИО логин, карточки нет. user_card
+                   кладёт require_user_html; None, если нет действующего
+                   назначения. #}
                 <ul class="navbar-nav ms-auto align-items-lg-center">
-                    <li class="nav-item">
-                        <span class="navbar-text me-3">{{ user.display_name }}</span>
+                    {# Мой факт — справа, рядом с именем: «моё» ищут там же,
+                       где себя. Выделен кнопкой (nav-link--fact в style.css).
+                       Два условия: право и кадровая карточка. Администратор
+                       проходит can() через обход, но у служебной учётки
+                       карточки нет — пункт вёл бы на экран с пояснением
+                       вместо матрицы. #}
+                    {% if can("fact:own") and user.employee %}
+                    <li class="nav-item me-lg-3 mb-2 mb-lg-0">
+                        <a class="nav-link nav-link--fact px-3{% if section == 'fact' %} active{% endif %}"
+                           href="/fact">Мой факт</a>
                     </li>
-                    <li class="nav-item">
-                        {# logout — действие с побочным эффектом, поэтому POST,
-                           а не ссылка. #}
-                        <form method="post" action="/logout" class="d-inline">
-                            <button type="submit" class="btn btn-outline-light btn-sm">
-                                Выход
-                            </button>
-                        </form>
+                    {% endif %}
+                    <li class="nav-item dropdown">
+                        <button class="nav-link dropdown-toggle" type="button"
+                                data-bs-toggle="dropdown" aria-expanded="false">
+                            {{ user.short_name }}
+                        </button>
+                        <div class="dropdown-menu dropdown-menu-end user-menu">
+                            {% if user.employee %}
+                            <div class="px-3 py-2">
+                                <div class="fw-semibold">{{ user.display_name }}</div>
+                                {% if user_card %}
+                                <div class="small text-body-secondary">{{ user_card.position }}</div>
+                                <div class="small text-body-secondary">{{ user_card.department }}</div>
+                                {% endif %}
+                            </div>
+                            <div class="dropdown-divider"></div>
+                            {% endif %}
+                            {# logout — действие с побочным эффектом, поэтому POST,
+                               а не ссылка. #}
+                            <form method="post" action="/logout">
+                                <button type="submit" class="dropdown-item">Выйти</button>
+                            </form>
+                        </div>
                     </li>
                 </ul>
             </div>
         </div>
     </nav>
 
-    {# flex-grow-1 растягивает контент и прижимает футер к низу. #}
     {# flex-grow-1 растягивает контент и прижимает футер к низу.
        Ширина одна на всё приложение: каркас с постоянной левой
        навигацией не должен менять габариты при переходе между
@@ -108,7 +120,7 @@
         {% block content %}{% endblock %}
     </main>
 
-    <footer class="bg-dark text-white text-center py-3 mt-4">
+    <footer class="border-top text-body-secondary text-center py-3 mt-4">
         <div class="container">
             <small>&copy; 2026 Сервис планирования</small>
         </div>

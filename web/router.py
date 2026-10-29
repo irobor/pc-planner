@@ -17,7 +17,8 @@ web_router.include_router(fact_router)
 web_router.include_router(planner_router, tags=["Web Планировщик"]) 
 # Для планировщика префикс не ставим, чтобы адрес остался /planner
 
-# Состав проекта. Префикс не ставим — путь /project-composition задан
-# прямо в роуте, как и у планировщика.
+# Состав проекта — экраны раздела «Планирование», поэтому адреса под
+# /planner/composition (первый сегмент пути = раздел в шапке). Префикс
+# не ставим — путь задан прямо в роуте, как и у планировщика.
 web_router.include_router(composition_router, tags=["Web Состав проекта"])
 web_router.include_router(admin_router)

@@ -273,13 +273,25 @@ function MarkSetCell({
 }
 
 /**
- * Ячейка сводной строки инженера: занят день чем-нибудь или нет.
+ * Ячейка сводной строки инженера: план и факт дня по ДВУМ каналам.
+ *
+ *   plan    — контур: null — плана нет; 'saved' — план записан (по
+ *             любому шифру); 'pending' — новый или перенесённый, не
+ *             сохранён (пунктир); 'removing' — снимается, ещё записан
+ *             (гаснущий контур);
+ *   fact    — заливка: null — факта нет, 'onplan' — факт по плановому
+ *             шифру, 'offplan' — факт без плана или по другому шифру.
+ *
+ * Каналы независимы, поэтому видны все четыре случая: только контур
+ * (план без факта — «пустой» день), контур с зелёной заливкой, контур
+ * с песочной (план был, работал над другим), песочная без контура
+ * (плана не было). Цвета заливки — те же классы, что в строках шифров.
  *
  * Буква табеля приходит даже когда отсутствие не блокирует
  * планирование (командировка): день планируемый, но отличать его от
  * обычного всё равно нужно.
  */
-function EmployeeCell({ day, busy, columnClasses }) {
+function EmployeeCell({ day, plan, fact, columnClasses }) {
   const classes = [...columnClasses];
   if (day?.state === 'nonwork') {
     classes.push('workload-grid__cell--nonwork');
@@ -293,9 +305,24 @@ function EmployeeCell({ day, busy, columnClasses }) {
     );
   }
 
+  let barClass = 'workload-bar';
+  if (plan) {
+    barClass += ' workload-bar--planned';
+  }
+  if (plan === 'pending') {
+    barClass += ' workload-bar--planned-pending';
+  } else if (plan === 'removing') {
+    barClass += ' workload-bar--planned-removing';
+  }
+  if (fact === 'onplan') {
+    barClass += ' workload-bar--fact';
+  } else if (fact === 'offplan') {
+    barClass += ' workload-bar--offplan';
+  }
+
   return (
     <td className={classes.join(' ')}>
-      {busy && <span className="workload-bar workload-bar--busy" />}
+      {(plan || fact) && <span className={barClass} />}
     </td>
   );
 }
@@ -439,6 +466,19 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
     }
     return result;
   }, [effectiveOwner]);
+
+
+  // То же, но по СОХРАНЁННОЙ занятости (ответ сервера без кликов). Нужна
+  // только сводной строке: сравнив с busyDays, она отличает записанный
+  // план от несохранённого и не выдаёт намерение за факт записи.
+  const savedBusyDays = useMemo(() => {
+    const result = new Map();
+    for (const [key, employeeId] of index?.ownerBySetDay || []) {
+      const [markSetId, iso] = key.split('|');
+      result.set(dayKey(employeeId, iso), Number(markSetId));
+    }
+    return result;
+  }, [index]);  
 
   const employeeById = useMemo(() => {
     const result = new Map();
@@ -715,11 +755,39 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
                     {dates.map((iso) => {
                       const key = dayKey(employee.id, iso);
                       const day = index.dayByKey.get(key);
+
+                      // План — сравнение эффективной занятости (с кликами)
+                      // с сохранённой: совпали — записан; появился или
+                      // сменил шифр — не сохранён; пропал — снимается.
+                      // Факт «по плану» — только если он стоит на ТОМ ЖЕ
+                      // шифре, что и план: та же оценка, что в ячейке
+                      // шифра (MarkSetCell). Дни с фактом заблокированы
+                      // для правки плана, поэтому там saved === effective.
+                      const planSetId = busyDays.get(key);
+                      const savedSetId = savedBusyDays.get(key);
+                      let plan = null;
+                      if (planSetId !== undefined) {
+                        plan = planSetId === savedSetId ? 'saved' : 'pending';
+                      } else if (savedSetId !== undefined) {
+                        plan = 'removing';
+                      }
+                      const hasFact = day?.state === 'has_fact';
+                      let fact = null;
+                      if (hasFact) {
+                        const onPlan =
+                          planSetId !== undefined &&
+                          index.factByKey.has(
+                            `${employee.id}|${planSetId}|${iso}`
+                          );
+                        fact = onPlan ? 'onplan' : 'offplan';
+                      }
+
                       return (
                         <EmployeeCell
                           key={iso}
                           day={day}
-                          busy={busyDays.has(key) || day?.state === 'has_fact'}
+                          plan={plan}
+                          fact={fact}
                           columnClasses={dayColumnClasses(
                             'workload-grid__cell',
                             iso,
@@ -886,6 +954,17 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
             {statusName}
           </span>
         ))}
+      </div>
+
+      {/* Сводная строка сотрудника: контур — план, заливка — факт. */}
+      <div className="workload-legend small text-muted mt-1">
+        <span className="fw-semibold me-2">Строка сотрудника:</span>
+        <span className="workload-bar workload-bar--planned" /> план, факта нет
+        <span className="workload-bar workload-bar--planned workload-bar--fact ms-3" />{' '}
+        факт по плану
+        <span className="workload-bar workload-bar--planned workload-bar--offplan ms-3" />{' '}
+        план есть, факт по другому шифру
+        <span className="workload-bar workload-bar--offplan ms-3" /> факт без плана
       </div>
     </div>
   );
