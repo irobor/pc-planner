@@ -15,10 +15,14 @@
 {# контейнер, а здесь нужно спрятать группу <tr> на произвольной       #}
 {# глубине. Каждая строка несёт data-path — путь предков вида          #}
 {# «/17/1/5/», по которому скрипт находит потомков сворачиваемого узла.#}
+{#                                                                     #}
+{# Под шифром — строки его пакетов работ: комплект выпускают, пакеты   #}
+{# делают. Колонки плана и исполнителя у пакета свои; у шифра — сводка #}
+{# по всем пакетам и готовность «готово N из M».                       #}
 {# ------------------------------------------------------------------ #}
 
 {% macro render_dept_rows(node, manageable_ids, expanded_ids, can_create,
-                          plan_summary, status_names,
+                          package_summary, set_summary,
                           level=0, path="", hidden=False) %}
 {% set is_mine = node.department.id in manageable_ids %}
 {# Раскрыта ли ветка при загрузке: свои и путь к ним — да, чужие — нет. #}
@@ -82,8 +86,10 @@
 
      Следствие: внутри строки НЕ должно быть других кликабельных
      элементов. Бейдж адресата — часть строки, а не ссылка на марку
-     получателя. #}
+     получателя. По той же причине «+ пакет» — отдельная строка ниже,
+     а не кнопка в строке шифра. #}
   {% for set_item in marka.sets %}
+  {% set summary = set_summary.get(set_item.id) %}
   <tr class="{% if not is_mine %}planner-tree__muted{% endif %}{% if is_mine and can_create %} planner-tree__set-row{% endif %}"
       data-path="{{ node_path }}"{% if child_hidden %} hidden{% endif %}
       {% if is_mine and can_create %}
@@ -91,48 +97,111 @@
       data-bs-target="#editSetModal"
       data-set-id="{{ set_item.id }}"
       data-marka-full="{{ set_item.marka_full }}"
-      data-executor-id="{{ set_item.id_executor or '' }}"
-      data-executor-name="{{ set_item.executor.full_name if set_item.executor else '' }}"
-      data-status-id="{{ set_item.status_id }}"
+      data-released-on="{{ set_item.released_on.isoformat() if set_item.released_on else '' }}"
       data-recipient-id="{{ set_item.recipient_composition_id or '' }}"
-      data-department-id="{{ node.department.id }}"
       data-marka-label="{{ marka.marka_type.code }} — {{ node.department.name }}"
+      data-readiness="{{ summary.done }} из {{ summary.packages }}"
       {% endif %}>
     <td class="planner-tree__name planner-tree__level-{{ level + 2 }}">
       <span class="planner-tree__code">{{ set_item.marka_full }}</span>
-      {# Статус — меткой с текстом: здесь, в отличие от сетки загрузки,
-         места хватает. Цвет — класс по номеру статуса (style.css). #}
-      <span class="badge set-status set-status--{{ set_item.status_id }} ms-1">
-        {{ status_names.get(set_item.status_id, "") }}
-      </span>
       {% if set_item.recipient_composition_id %}
       <span class="badge bg-primary-subtle text-primary-emphasis">
         &rarr; задание
       </span>
       {% endif %}
-    </td>
-    {# Колонки плана — сводка по ВСЕМ активным планам шифра (роут,
-       plan_summary): Дни — сумма человеко-дней, Срок — самый поздний
-       последний день. Несколько исполнителей (передача работы,
-       параллельная разработка) помечаются «N исп.», чтобы было видно,
-       что сумма сложена из разных людей.
-       Прочерк — шифр заведён, но не спланирован: рабочее состояние,
-       назначение исполнителя и планирование разведены. #}
-    {% set plan = plan_summary.get(set_item.id) %}
-    {% if plan %}
-    <td class="text-end">{{ plan.days }}</td>
-    <td>
-      {{ plan.end_date.strftime("%d.%m.%Y") if plan.end_date else "—" }}
-      {% if plan.executors > 1 %}
-      <span class="text-muted small ms-1">· {{ plan.executors }} исп.</span>
+      {# Выпуск — дата, а не статус: ставит начальник вручную. До выпуска
+         вместо неё — готовность пакетов, по которой он и решает. #}
+      {% if set_item.released_on %}
+      <span class="badge bg-success-subtle text-success-emphasis ms-1">
+        выпущен {{ set_item.released_on.strftime("%d.%m.%Y") }}
+      </span>
+      {% elif summary.packages %}
+      <span class="text-muted small ms-1">
+        готово {{ summary.done }} из {{ summary.packages }}
+      </span>
       {% endif %}
+    </td>
+    {# Сводка по всем пакетам шифра: дни — сумма, срок — от самого
+       раннего первого дня до самого позднего последнего. Исполнитель
+       у шифра не показывается — он у каждого пакета свой. #}
+    {% if summary.plan %}
+    <td class="text-end">{{ summary.plan.days }}</td>
+    <td>
+      {{ summary.plan.start.strftime("%d.%m") }} –
+      {{ summary.plan.end.strftime("%d.%m.%Y") }}
     </td>
     {% else %}
     <td class="text-end text-muted">—</td>
     <td class="text-muted">не спланирован</td>
     {% endif %}
-    <td>{{ set_item.executor.full_name if set_item.executor else "" }}</td>
+    <td></td>
   </tr>
+
+    {# Пакеты шифра. Строка пакета кликабельна целиком — открывает его
+       карточку. Порядок — по названию без учёта регистра, как люди и
+       ищут глазами. Статус — меткой; цвет — класс по номеру статуса
+       (style.css), примечание к статусу — во всплывающей подсказке. #}
+    {% for package in set_item.packages|sort(attribute="name") %}
+    {% set plan = package_summary.get(package.id) %}
+    <tr class="{% if not is_mine %}planner-tree__muted{% endif %}{% if is_mine and can_create %} planner-tree__set-row{% endif %}"
+        data-path="{{ node_path }}"{% if child_hidden %} hidden{% endif %}
+        {% if is_mine and can_create %}
+        data-bs-toggle="modal"
+        data-bs-target="#editPackageModal"
+        data-package-id="{{ package.id }}"
+        data-name="{{ package.name }}"
+        data-description="{{ package.description or '' }}"
+        data-executor-id="{{ package.executor_id or '' }}"
+        data-executor-name="{{ package.executor.full_name if package.executor else '' }}"
+        data-status-id="{{ package.status_id }}"
+        data-department-id="{{ node.department.id }}"
+        data-set-label="{{ set_item.marka_full }}"
+        {% endif %}>
+      <td class="planner-tree__name planner-tree__level-{{ level + 3 }}">
+        {{ package.name }}
+        <span class="badge package-status package-status--{{ package.status_id }} ms-1"
+              {% if package.status.note %}title="{{ package.status.note }}"{% endif %}>
+          {{ package.status.name }}
+        </span>
+      </td>
+      {% if plan %}
+      <td class="text-end">{{ plan.days }}</td>
+      <td>{{ plan.start.strftime("%d.%m") }} – {{ plan.end.strftime("%d.%m.%Y") }}</td>
+      {% else %}
+      <td class="text-end text-muted">—</td>
+      <td class="text-muted">не спланирован</td>
+      {% endif %}
+      {# Пакет без исполнителя законен — его только нельзя спланировать. #}
+      <td>
+        {% if package.executor %}
+        {{ package.executor.full_name }}
+        {% else %}
+        <span class="text-muted">не назначен</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+
+    {# Заведение пакета — своя строка с единственной кнопкой: строка
+       шифра кликабельна целиком, и кнопка внутри неё открыла бы обе
+       модалки. Здесь кликабельна только кнопка — и она доступна с
+       клавиатуры, в отличие от строки. #}
+    {% if is_mine and can_create %}
+    <tr data-path="{{ node_path }}"{% if child_hidden %} hidden{% endif %}>
+      <td class="planner-tree__name planner-tree__level-{{ level + 3 }}">
+        <button type="button"
+                class="btn btn-link btn-sm p-0"
+                data-bs-toggle="modal"
+                data-bs-target="#createPackageModal"
+                data-set-id="{{ set_item.id }}"
+                data-set-label="{{ set_item.marka_full }}"
+                data-department-id="{{ node.department.id }}">
+          + пакет
+        </button>
+      </td>
+      <td></td><td></td><td></td>
+    </tr>
+    {% endif %}
   {% endfor %}
 
   {# Марка без шифров — состояние до заведения комплекта. #}
@@ -150,7 +219,7 @@
 {# Дочерние отделы — рекурсия с накоплением пути и уровня отступа. #}
 {% for child in node.children %}
 {{ render_dept_rows(child, manageable_ids, expanded_ids, can_create,
-                    plan_summary, status_names,
+                    package_summary, set_summary,
                     level + 1, node_path, child_hidden) }}
 {% endfor %}
 {% endmacro %}

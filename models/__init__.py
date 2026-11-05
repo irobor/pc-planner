@@ -44,15 +44,16 @@ from app.models.employee import Employee, EmployeeAssignment, Position  # noqa: 
 from app.models.project import Project  # noqa: F401
 
 # Модели раздела «Состав проекта» + связующие Table.
-# SetStatus живёт здесь, а не в project.py: статус описывает жизненный
-# цикл КОМПЛЕКТА (project_mark_sets), а не проекта в журнале.
+# Пакеты работ и их статусы живут здесь же: пакет — часть комплекта
+# (project_mark_sets), тот же раздел предметной области.
 from app.models.composition import (  # noqa: F401
     Department,
     MarkaType,
     ProjectComposition,
     ProjectMarkSet,
+    PackageStatus,
     ProjectStage,
-    SetStatus,
+    WorkPackage,
     department_markas,
     marka_to_stage,
 )
@@ -65,7 +66,7 @@ from app.models.planning import (  # noqa: F401
     FactCalendarCell,
     PlanCalendarCell,
     ProductionCalendar,
-    WorkPlan,
+
 )
 
 # Read-only проекция состава проекта (VIEW v_project_composition).
@@ -93,15 +94,15 @@ __all__ = [
     "ProjectStage",
     "ProjectMarkSet",
     "ProjectComposition",
-    "SetStatus",
+    "PackageStatus",
+    "WorkPackage",
     "department_markas",
     "marka_to_stage",
     "VProjectComposition",
     "DayType",
     "ProductionCalendar",
     "AbsenceType",
-    "AbsencePeriod",
-    "WorkPlan",
+    "AbsencePeriod",    
     "PlanCalendarCell",
     "FactCalendarCell",
 ]

@@ -97,9 +97,19 @@ class AdminChangeset(Base):
 class AdminChangeItem(Base):
     """Изменённая ячейка правки — строка diff.
 
-    old / new = NULL — ячейка была пустой / стала пустой. Снимки шифра
-    (old_marka, new_marka) хранятся текстом: внешний ключ при удалении
-    шифра обнулится (SET NULL), а читаемая запись останется.
+    old / new = NULL — ячейка была пустой / стала пустой. Ссылки ведут
+    на пакет работ: план и факт лежат на пакетах, а не на шифрах.
+
+    Снимки (old_marka, new_marka) хранятся текстом в виде «шифр · пакет»:
+    внешний ключ при удалении пакета обнулится (SET NULL), а читаемая
+    запись останется. Имена колонок прежние — в базе их не переименовывали.
+
+    Пакет в снимке обязателен, а не только шифр: проверка
+    admin_change_items_is_change сравнивает снимки, и перенос дня с
+    «поддонов» на «столбы» того же шифра без имени пакета выглядел бы как
+    «ничего не изменилось» и был бы отвергнут. Уникальность
+    «шифр · пакет» гарантирует уникальный индекс названия пакета в
+    пределах шифра.
     """
 
     __tablename__ = "admin_change_items"
@@ -116,11 +126,11 @@ class AdminChangeItem(Base):
 
     work_date: Mapped[date] = mapped_column(Date, nullable=False)
 
-    old_mark_set_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("project_mark_sets.id", ondelete="SET NULL")
+    old_package_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="SET NULL")
     )
-    new_mark_set_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("project_mark_sets.id", ondelete="SET NULL")
+    new_package_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="SET NULL")
     )
 
     old_marka: Mapped[Optional[str]] = mapped_column(Text)
@@ -137,11 +147,11 @@ class AdminChangeItem(Base):
             name="admin_change_items_layer_check",
         ),
         CheckConstraint(
-            "old_mark_set_id IS NULL OR old_marka IS NOT NULL",
+            "old_package_id IS NULL OR old_marka IS NOT NULL",
             name="admin_change_items_old_snapshot",
         ),
         CheckConstraint(
-            "new_mark_set_id IS NULL OR new_marka IS NOT NULL",
+            "new_package_id IS NULL OR new_marka IS NOT NULL",
             name="admin_change_items_new_snapshot",
         ),
         CheckConstraint(

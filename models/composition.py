@@ -16,13 +16,16 @@
 консистентно с user_roles/role_permissions в user.py: собственных полей
 у них нет, это чистые матрицы many-to-many.
 """
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional, TYPE_CHECKING
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
+    Identity,
     Index,
     String,
     Table,
@@ -277,8 +280,13 @@ class ProjectMarkSet(Base):
     признак задания выводится из наличия адресата, поэтому разойтись
     ему не с чем.
 
-    Запись ведут оба контура: Flask (реестр) и FastAPI (кабинет
-    начальника бюро). last_update без onupdate на стороне ORM —
+    Комплект — то, что выпускают; работу внутри него делают пакеты
+    (WorkPackage). Поэтому у комплекта нет ни исполнителя, ни статуса
+    хода работ: и то и другое живёт у пакетов. У комплекта остаётся
+    только дата выпуска — её ставит начальник бюро.
+
+    Пишет в таблицу только FastAPI: Flask комплекты не читает (проверено
+    поиском по коду журнала). last_update без onupdate на стороне ORM —
     штамп ставит пишущая сторона явно.
     """
 
@@ -309,24 +317,15 @@ class ProjectMarkSet(Base):
     # бюро. UNIQUE на уровне БД гарантирует отсутствие дублей шифров.
     marka_full: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
 
-    # Исполнитель. FK на employees без relationship (минимум для дерева —
-    # решение согласовано): в дереве состава ФИО не показываем, только
-    # шифр. SET NULL: увольнение сотрудника обнуляет ссылку, комплект
-    # остаётся. Nullable — комплект может быть ещё не назначен.
-    id_executor: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("employees.id", ondelete="SET NULL"),
-    )
-
-    # Статус документа. FK на set_statuses без relationship (минимум).
-    # RESTRICT: нельзя удалить статус, пока на него ссылается комплект.
-    status_id: Mapped[int] = mapped_column(
-        ForeignKey("set_statuses.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # Дата выпуска комплекта. NULL — не выпущен. Ставит начальник бюро
+    # вручную, увидев готовность пакетов; автоперехода нет. Дата, а не
+    # статус: отвечает сразу и «выпущен ли», и «когда» — для задания это
+    # момент выдачи смежнику, которого ждёт получатель.
+    released_on: Mapped[Optional[date]] = mapped_column(Date)
 
     # Метки времени — timestamptz (WITH time zone), в отличие от projects
-    # (там without). server_default=now() ставит БД. onupdate НЕ ставим —
-    # см. docstring класса (запись ведёт Flask, у нас только чтение).
+    # (там without). server_default=now() ставит БД. onupdate НЕ ставим:
+    # штамп ставит пишущая сторона явно, см. docstring класса.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -342,21 +341,19 @@ class ProjectMarkSet(Base):
         foreign_keys="ProjectMarkSet.composition_id",
     )
 
-        # Исполнитель шифра. lazy="raise_on_sql": в async-контуре ленивая
-    # подгрузка при обращении из шаблона даёт MissingGreenlet уже после
-    # закрытия сессии — далеко от места, где формировался запрос.
-    # Явная ошибка при разработке лучше падения на рендеринге.
-    executor: Mapped[Optional["Employee"]] = relationship(
-        foreign_keys="ProjectMarkSet.id_executor",
+    # Пакеты работ комплекта. passive_deletes=True: удаление шифра
+    # каскадит на пакеты силами БД (ON DELETE CASCADE), ORM не должна
+    # вычитывать их ради построчного DELETE.
+    packages: Mapped[List["WorkPackage"]] = relationship(
+        back_populates="mark_set",
         lazy="raise_on_sql",
+        passive_deletes=True,
     )
 
     __table_args__ = (
-        # Индексы — faithful DDL (idx_sets_composition/executor/status),
-        # чтобы autogenerate не счёл их лишними и не предложил удалить.
+        # Индекс — faithful DDL, чтобы autogenerate не счёл его лишним и
+        # не предложил удалить.
         Index("idx_sets_composition", "composition_id"),
-        Index("idx_sets_executor", "id_executor"),
-        Index("idx_sets_status", "status_id"),
         # Частичный индекс по заданиям: строки с NULL в него не попадают.
         # postgresql_where зеркалит WHERE из DDL — без него autogenerate
         # увидит расхождение и предложит пересоздать индекс.
@@ -381,34 +378,127 @@ class ProjectMarkSet(Base):
         )
 
 
-class SetStatus(Base):
-    """Статус комплекта: жизненный цикл документа.
 
-    Значения: 1 «В плане», 2 «В работе», 3 «На проверке», 4 «Выпущен».
-    Новый шифр заводится с «В плане»; «Выпущен» ставит начальник бюро,
-    подтверждая сдачу.
+class PackageStatus(Base):
+    """Статус пакета работ.
 
-    Модель нужна не только для чтения названий: без неё SQLAlchemy не
-    может разрешить внешний ключ project_mark_sets.status_id и падает
-    на INSERT (NoReferencedTableError) — при сбросе в базу движок
-    выстраивает порядок вставки по зависимостям и разыменовывает
-    каждый FK.
+    Ставит исполнитель пакета, включая стадии согласования: комплект
+    уходит на согласование — каждый исполнитель переводит свой пакет;
+    вернули на доработку — пакет обратно «В работе».
+
+    is_done — признак «разработка завершена». По нему считается
+    готовность комплекта: доля пакетов с is_done. Признак живёт в
+    справочнике, а не в коде, — новый статус отмечается флагом, а код
+    списков вроде «статусы 2, 3, 4, 5 считаются готовыми» не держит.
+
+    Цвета в справочнике нет намеренно: цвет статуса задаётся в CSS по
+    его id — подставить цвет из базы можно только inline-стилем, а он в
+    проекте запрещён.
     """
 
-    __tablename__ = "set_statuses"
+    __tablename__ = "package_statuses"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # id заданы в миграции явно, последовательности нет: на «В работе»
+    # (id 1) ссылается умолчание WorkPackage.status_id.
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
 
-    # Колонка есть в DDL, но не используется ни FastAPI, ни Flask: цвет
-    # статуса задаётся в static/css/style.css (--status-N), потому что
-    # подставить его из базы можно только запрещённым inline-стилем.
-    # Хранит прежнюю палитру — ориентироваться на неё не нужно.
-    color: Mapped[Optional[str]] = mapped_column(String(20))
+    name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
 
-    # Порядок отображения в списках. server_default, а не default:
-    # значение проставляет БД, и оно едино для обоих контуров.
-    sort_order: Mapped[Optional[int]] = mapped_column(server_default="0")
+    # Примечание к статусу, читают люди: «Согласование у заказчика».
+    note: Mapped[Optional[str]] = mapped_column(Text)
+
+    sort_order: Mapped[int] = mapped_column(server_default="0", nullable=False)
+
+    is_done: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), nullable=False
+    )
 
     def __repr__(self) -> str:
-        return f"SetStatus(id={self.id!r}, name={self.name!r})"
+        return f"PackageStatus(id={self.id!r}, name={self.name!r})"
+
+
+class WorkPackage(Base):
+    """Пакет работ — часть комплекта по смыслу работы.
+
+    Комплект — то, что выпускают; пакет — то, что делают. Начальник бюро
+    создаёт пакет, называет его по смыслу («поддоны», «опросник»,
+    «полный») и назначает исполнителя. Сколько файлов .dwg внутри
+    пакета, решает исполнитель — системе это неизвестно и не нужно.
+
+    План и факт ссылаются на пакет, а не на комплект: у пакета ровно
+    один исполнитель, поэтому «кто должен был работать» однозначен.
+
+    Исполнитель необязателен — пакет можно завести заранее и назначить
+    позже. Без исполнителя пакет нельзя спланировать: плановой ячейке
+    нужен человек.
+    """
+
+    __tablename__ = "work_packages"
+
+    # GENERATED BY DEFAULT AS IDENTITY в БД — Identity() по умолчанию
+    # always=False, что ему и соответствует.
+    id: Mapped[int] = mapped_column(Identity(), primary_key=True)
+
+    # CASCADE: удаление шифра уносит его пакеты, а с ними план и факт —
+    # то же поведение, что было у плана и факта на шифре.
+    mark_set_id: Mapped[int] = mapped_column(
+        ForeignKey("project_mark_sets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+
+    description: Mapped[Optional[str]] = mapped_column(Text)
+
+    # SET NULL: удаление сотрудника снимает назначение, пакет остаётся.
+    # История при этом цела — каждая ячейка плана и факта хранит своего
+    # сотрудника отдельно.
+    executor_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("employees.id", ondelete="SET NULL"),
+    )
+
+    # Умолчание 1 — «В работе»: пакет создают уже для планирования,
+    # статуса «не начат» нет.
+    status_id: Mapped[int] = mapped_column(
+        ForeignKey("package_statuses.id", ondelete="RESTRICT"),
+        server_default="1",
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    mark_set: Mapped["ProjectMarkSet"] = relationship(
+        back_populates="packages",
+        lazy="raise_on_sql",
+    )
+    executor: Mapped[Optional["Employee"]] = relationship(lazy="raise_on_sql")
+    status: Mapped["PackageStatus"] = relationship(lazy="raise_on_sql")
+
+    __table_args__ = (
+        # Пустое название запрещено и базой: «   » — не название.
+        CheckConstraint(
+            "btrim(name) <> ''",
+            name="work_packages_name_not_blank",
+        ),
+        # Название уникально в пределах комплекта без учёта регистра и
+        # краевых пробелов: «Поддоны» и « поддоны » — один пакет. Между
+        # комплектами названия повторяются свободно.
+        Index(
+            "uq_work_packages_set_name",
+            "mark_set_id",
+            text("lower(btrim(name))"),
+            unique=True,
+        ),
+        # Пакеты исполнителя: «Мой факт» и строки сетки плана.
+        Index("idx_work_packages_executor", "executor_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"WorkPackage(id={self.id!r}, mark_set_id={self.mark_set_id!r}, "
+            f"name={self.name!r})"
+        )

@@ -9,6 +9,7 @@
 планирования. Дерево строится тем же build_composition_tree, но набор
 доступных составов ограничен областью управления пользователя.
 """
+from dataclasses import dataclass
 from typing import Annotated, Optional
 from datetime import date
 
@@ -19,15 +20,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
+from app.core.assignments import is_current_assignment
 from app.core.dependencies import get_db
 from app.core.dept_tree import build_composition_tree, collect_expanded_ids
 from app.core.guards import RequirePermissionHtml
 from app.core.scope import Scope, get_scope_html
-from app.models.composition import Department, ProjectComposition, ProjectMarkSet, SetStatus
+from app.models.composition import (
+    Department,
+    PackageStatus,
+    ProjectComposition,
+    ProjectMarkSet,
+    WorkPackage,
+)
 from app.models.employee import Employee, EmployeeAssignment
 from app.models.project import Project
 from app.models.user import User
-from app.models.planning import FactCalendarCell, PlanCalendarCell, WorkPlan
+from app.models.planning import FactCalendarCell, PlanCalendarCell
 from app.web.templates import templates
 
 
@@ -36,13 +44,7 @@ router = APIRouter()
 # Право на заведение шифров. Есть у обоих начальников; у инженера нет —
 # он работы не создаёт, только исполняет.
 SET_MANAGE_PERMISSION = "set:manage"
-# set_statuses: 1 «В плане», 2 «В работе», 3 «На проверке», 4 «Выпущен».
-# Новый шифр всегда стартует с «В плане»: работа ещё не начата, плана
-# может не быть вовсе (назначение отделено от планирования).
-STATUS_SET_PLANNED = 1
-# set_statuses: 4 «Выпущен» — документ сдан заказчику. Такой шифр не
-# удаляется никогда: это уже не черновая запись, а факт выпуска.
-STATUS_SET_RELEASED = 4
+
 # Право на просмотр плана. Есть у обоих начальников, инженера, ГИПа и
 # начальника ПЦ; нет у табельщицы и registry_editor — им планировщик
 # не нужен, и пункт меню у них скрыт тем же правом.
@@ -69,11 +71,31 @@ STATUS_FILTERS: dict[str, Optional[tuple[int, ...]]] = {
 }
 DEFAULT_STATUS_FILTER = "active"
 
-# Статусы плана, которые считаются действующими. Тот же фильтр, что в
-# сервисе планирования (_load_work_plans): архивные планы в сводку
-# не попадают.
-ACTIVE_PLAN_STATUSES: tuple[str, ...] = ("draft", "confirmed")
+@dataclass(frozen=True)
+class PlanSpan:
+    """Сводка плана: сколько дней положено и в каких границах.
 
+    Шапки плана в базе нет — план это только ячейки, поэтому границы и
+    число дней вычисляются из положенного при каждом показе.
+    """
+
+    days: int
+    start: date
+    end: date
+
+
+@dataclass(frozen=True)
+class SetSummary:
+    """Сводка комплекта для строки шифра в дереве.
+
+    done / packages — готовность: сколько пакетов в статусе с признаком
+    «разработка завершена». plan — общий срок по всем пакетам, None —
+    ни один пакет ещё не спланирован.
+    """
+
+    packages: int
+    done: int
+    plan: Optional[PlanSpan]
 
 async def _load_bureau_projects(
     db: AsyncSession,
@@ -127,6 +149,16 @@ def _form_int(value: Optional[str]) -> Optional[int]:
     if value is None or not value.strip():
         return None
     return int(value)
+
+def _form_date(value: Optional[str]) -> Optional[date]:
+    """Пустая строка из <input type="date"> → None, иначе дата.
+
+    Браузер шлёт дату в ISO (ГГГГ-ММ-ДД). Неверная строка даёт
+    ValueError — роут превращает её в понятное сообщение, а не в 500.
+    """
+    if value is None or not value.strip():
+        return None
+    return date.fromisoformat(value.strip())
 
 @router.get(
     "/planner/works",
@@ -201,8 +233,11 @@ async def planner_works(
         )
 
     # Строки состава со связями. joinedload для «-к-одному» (дёшево, без
-    # размножения строк), selectinload для коллекции mark_sets — отдельным
-    # батч-запросом, чтобы не плодить декартово произведение.
+    # размножения строк), selectinload для коллекций — отдельными
+    # батч-запросами, чтобы не плодить декартово произведение.
+    # Цепочка: строка состава → шифры → пакеты → исполнитель и статус
+    # пакета. Связи объявлены с lazy="raise_on_sql", поэтому всё, что
+    # прочтёт шаблон, должно быть загружено здесь явно.
     comp_stmt = (
         select(ProjectComposition)
         .where(ProjectComposition.project_id == project)
@@ -210,8 +245,11 @@ async def planner_works(
             joinedload(ProjectComposition.department),
             joinedload(ProjectComposition.marka_type),
             joinedload(ProjectComposition.stage),
-            selectinload(ProjectComposition.mark_sets).selectinload(
-                ProjectMarkSet.executor
+            selectinload(ProjectComposition.mark_sets)
+            .selectinload(ProjectMarkSet.packages)
+            .options(
+                joinedload(WorkPackage.executor),
+                joinedload(WorkPackage.status),
             ),
         )
     )
@@ -240,7 +278,7 @@ async def planner_works(
     else:
         manageable_ids = set(scope.department_ids)
 
-    # Кандидаты в исполнители: сотрудники подразделений области с
+    # Кандидаты в исполнители пакета: сотрудники подразделений области с
     # актуальным назначением. Отдаём вместе с department_id — форма
     # покажет только тех, кто числится в бюро выбранной марки.
     today = date.today()
@@ -258,15 +296,14 @@ async def planner_works(
                 )
                 .where(
                     EmployeeAssignment.department_id.in_(manageable_ids),
-                    EmployeeAssignment.valid_from <= today,
-                    (EmployeeAssignment.valid_to.is_(None))
-                    | (EmployeeAssignment.valid_to >= today),
+                    is_current_assignment(today),
                 )
                 .order_by(Employee.full_name)
             )
         ).all()
     )
-        # Кандидаты в адресаты заданий: все строки состава этого проекта,
+
+    # Кандидаты в адресаты заданий: все строки состава этого проекта,
     # включая чужие бюро — задание тем и является, работой для смежника.
     # Второго запроса не нужно: compositions уже загружены выше вместе
     # со связями marka_type и department.
@@ -277,58 +314,73 @@ async def planner_works(
         }
         for c in compositions
     ]
-        # Справочник статусов для карточки шифра. Порядок — sort_order,
+
+    # Справочник статусов пакета для карточки пакета. Порядок — sort_order,
     # он для того и заведён.
-    set_statuses = list(
+    package_statuses = list(
         (
             await db.execute(
-                select(SetStatus).order_by(SetStatus.sort_order, SetStatus.id)
+                select(PackageStatus).order_by(
+                    PackageStatus.sort_order, PackageStatus.id
+                )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
 
-        # Сводка планов по шифрам проекта — для колонок «Дни» и «Срок».
-    # Одним агрегирующим запросом, а не по запросу на шифр:
-    #   Дни       — сумма человеко-дней по ВСЕМ активным планам шифра;
-    #   Срок      — самый поздний последний день;
-    #   executors — сколько разных людей: при передаче работы или
-    #               параллельной разработке сумма сложена из нескольких.
-    set_ids = [s.id for c in compositions for s in c.mark_sets]
-    plan_summary: dict[int, dict[str, object]] = {}
-    if set_ids:
+    # Сводка плана по пакетам — для колонок «Дни» и «Срок». Одним
+    # агрегирующим запросом по плановым ячейкам, а не по запросу на пакет.
+    mark_sets = [ms for c in compositions for ms in c.mark_sets]
+    package_ids = [p.id for ms in mark_sets for p in ms.packages]
+    package_summary: dict[int, PlanSpan] = {}
+    if package_ids:
         plan_rows = await db.execute(
             select(
-                WorkPlan.mark_set_id,
-                func.sum(WorkPlan.work_days),
-                func.max(WorkPlan.end_date),
-                func.count(func.distinct(WorkPlan.employee_id)),
+                PlanCalendarCell.package_id,
+                func.count(PlanCalendarCell.id),
+                func.min(PlanCalendarCell.work_date),
+                func.max(PlanCalendarCell.work_date),
             )
-            .where(
-                WorkPlan.mark_set_id.in_(set_ids),
-                WorkPlan.status.in_(ACTIVE_PLAN_STATUSES),
-            )
-            .group_by(WorkPlan.mark_set_id)
+            .where(PlanCalendarCell.package_id.in_(package_ids))
+            .group_by(PlanCalendarCell.package_id)
         )
-        plan_summary = {
-            mark_set_id: {"days": days, "end_date": end_date, "executors": count}
-            for mark_set_id, days, end_date, count in plan_rows.all()
+        package_summary = {
+            package_id: PlanSpan(days=days, start=first_day, end=last_day)
+            for package_id, days, first_day, last_day in plan_rows.all()
         }
 
-    # Названия статусов для метки в строке шифра. Справочник уже
-    # загружен для карточки — второго запроса не нужно.
-    status_names = {st.id: st.name for st in set_statuses}
-
+    # Сводка по шифру — из уже загруженного, без запросов к базе.
+    # Готовность берёт признак «разработка завершена» из справочника
+    # (status.is_done), а не из списка id в коде. Срок шифра — от самого
+    # раннего первого дня его пакетов до самого позднего последнего.
+    set_summary: dict[int, SetSummary] = {}
+    for ms in mark_sets:
+        spans = [package_summary[p.id] for p in ms.packages if p.id in package_summary]
+        set_summary[ms.id] = SetSummary(
+            packages=len(ms.packages),
+            done=sum(1 for p in ms.packages if p.status.is_done),
+            plan=(
+                PlanSpan(
+                    days=sum(sp.days for sp in spans),
+                    start=min(sp.start for sp in spans),
+                    end=max(sp.end for sp in spans),
+                )
+                if spans
+                else None
+            ),
+        )
 
     expanded_ids = collect_expanded_ids(tree, manageable_ids)
 
     return templates.TemplateResponse(
         "planner/works.html",
-                {
+        {
             "request": request,
             "project": selected,
             "projects": projects,
             "status_key": status_key,
-            "tree": tree,            
+            "tree": tree,
             "manageable_ids": manageable_ids,
             "expanded_ids": expanded_ids,
             # Право на заведение шифров. Передаётся флагом, потому что
@@ -337,14 +389,16 @@ async def planner_works(
             "can_manage_sets": user.can(SET_MANAGE_PERMISSION),
             "executors": executors,
             "recipients": recipients,
-            "set_statuses": set_statuses,
-                        # Для макроса дерева — он подключён через import и контекст
+            "package_statuses": package_statuses,
+            # Для макроса дерева — он подключён через import и контекст
             # страницы не видит, поэтому данные передаются аргументами.
-            "plan_summary": plan_summary,
-            "status_names": status_names,
+            "package_summary": package_summary,
+            "set_summary": set_summary,
+            # Верхняя граница даты выпуска в карточке шифра: выпуск в
+            # будущем невозможен по смыслу.
+            "today": today,
         },
     )
-
 @router.post(
     "/planner/works/{project_id}/sets",
     tags=["Web Планировщик"],
@@ -357,7 +411,6 @@ async def planner_create_set(
     db: Annotated[AsyncSession, Depends(get_db)],
     composition_id: Annotated[int, Form()],
     marka_full: Annotated[str, Form()],
-    id_executor: Annotated[Optional[str], Form()] = None,
     recipient_composition_id: Annotated[Optional[str], Form()] = None,
 ) -> RedirectResponse:
     """Заводит комплект или задание под строкой состава своего бюро.
@@ -366,10 +419,13 @@ async def planner_create_set(
     recipient_composition_id. Отдельной ветки для «изменения» (#2) нет —
     это обычный комплект с другим текстом в шифре.
 
+    Комплект заводится без исполнителя и без статуса: работу внутри него
+    делают пакеты, их начальник заводит следом. У комплекта остаётся
+    только дата выпуска — она пуста, пока комплект не выпущен.
+
     Все проверки выполняются на сервере повторно, даже если интерфейс
     уже погасил кнопку: гашение — удобство, а не защита.
     """
-    executor_id = _form_int(id_executor)
     recipient_id = _form_int(recipient_composition_id)
 
     # 1. Строка состава существует И принадлежит указанному проекту.
@@ -400,7 +456,7 @@ async def planner_create_set(
         )
 
     # 3. Шифр вводится вручную (автосборка отвергнута): проверяем только,
-    #    что он непустой. Уникальность обеспечивает БД — см. шаг 7.
+    #    что он непустой. Уникальность обеспечивает БД — см. шаг 6.
     code = marka_full.strip()
     if not code:
         return _back(project_id, composition_id, "empty")
@@ -426,37 +482,16 @@ async def planner_create_set(
         if recipient is None:
             return _back(project_id, composition_id, "recipient")
 
-    # 5. Исполнитель: обязан числиться в подразделении ЭТОЙ строки
-    #    состава на сегодня. Без проверки в форму можно подставить любой
-    #    id и назначить шифр сотруднику чужого бюро.
-    if executor_id is not None:
-        today = date.today()
-        belongs = (
-            await db.execute(
-                select(EmployeeAssignment.id).where(
-                    EmployeeAssignment.employee_id == executor_id,
-                    EmployeeAssignment.department_id == composition.department_id,
-                    EmployeeAssignment.valid_from <= today,
-                    (EmployeeAssignment.valid_to.is_(None))
-                    | (EmployeeAssignment.valid_to >= today),
-                )
-            )
-        ).scalar_one_or_none()
-
-        if belongs is None:
-            return _back(project_id, composition_id, "executor")
-
-    # 6. Создание. status_id обязателен и умолчания в схеме не имеет.
-    mark_set = ProjectMarkSet(
-        composition_id=composition_id,
-        marka_full=code,
-        id_executor=executor_id,
-        status_id=STATUS_SET_PLANNED,
-        recipient_composition_id=recipient_id,
+    # 5. Создание.
+    db.add(
+        ProjectMarkSet(
+            composition_id=composition_id,
+            marka_full=code,
+            recipient_composition_id=recipient_id,
+        )
     )
-    db.add(mark_set)
 
-    # 7. marka_full уникален ПО ВСЕЙ БАЗЕ (project_mark_sets_marka_full_key),
+    # 6. marka_full уникален ПО ВСЕЙ БАЗЕ (project_mark_sets_marka_full_key),
     #    а не в рамках проекта. Повтор даёт SQLSTATE 23505 — перехватываем,
     #    иначе пользователь получил бы 500 вместо объяснения.
     try:
@@ -498,23 +533,21 @@ async def planner_update_set(
     scope: Annotated[Scope, Depends(get_scope_html)],
     db: Annotated[AsyncSession, Depends(get_db)],
     marka_full: Annotated[str, Form()],
-    status_id: Annotated[int, Form()],
-    # ВАЖНО: None здесь означает «поле не пришло вовсе», а пустая строка —
-    # «пришло пустым». Для исполнителя это разные команды: не трогать
-    # против снять. Поле отправляется только после нажатия «Сменить»,
-    # поэтому карточка уволенного сотрудника сохраняется без потери
-    # исполнителя — отправлять просто нечего.
-    id_executor: Annotated[Optional[str], Form()] = None,
+    # Пусто — комплект не выпущен; дата — выпущен в этот день.
+    released_on: Annotated[Optional[str], Form()] = None,
     recipient_composition_id: Annotated[Optional[str], Form()] = None,
 ) -> RedirectResponse:
-    """Правит шифр, исполнителя, статус и адресат задания.
+    """Правит шифр, адресат задания и дату выпуска.
+
+    Исполнителя и статуса у комплекта больше нет — они у пакетов и
+    правятся в карточке пакета.
+
+    «Выпущен» ставится при любой готовности пакетов: начальник видит
+    готовность рядом с датой и решает сам. Запрет отнял бы возможность
+    выпустить комплект, если исполнитель забыл закрыть свой пакет.
 
     Перенос шифра под другую марку здесь не делается: это операция с
     другими последствиями, и composition_id формой не принимается.
-
-    План (даты, дни) не трогаем — он живёт в work_plan и меняется на
-    экране планирования. Обрезка плана при смене исполнителя появится
-    вместе с ним: сейчас обрезать нечего.
     """
     # 1. Шифр существует и лежит в указанном проекте. Второе условие
     #    обязательно: set_id приходит из формы, и без проверки можно было
@@ -539,49 +572,47 @@ async def planner_update_set(
             detail="Шифр не найден",
         )
 
-    # 2. Строка состава нужна для проверки области и принадлежности
-    #    исполнителя. Отдельным запросом, а не relationship: связь
-    #    объявлена с lazy="raise_on_sql", и ленивая подгрузка тут
-    #    осознанно запрещена.
-    composition = (
+    composition_id = mark_set.composition_id
+
+    # 2. Область управления. Гашение строки в интерфейсе защитой не
+    #    является — чужой шифр не кликабелен, но форму можно отправить
+    #    и напрямую. Нужен только отдел строки состава — одним полем.
+    department_id = (
         await db.execute(
-            select(ProjectComposition).where(
-                ProjectComposition.id == mark_set.composition_id
+            select(ProjectComposition.department_id).where(
+                ProjectComposition.id == composition_id
             )
         )
     ).scalar_one()
 
-    # 3. Область управления. Гашение строки в интерфейсе защитой не
-    #    является — чужой шифр не кликабелен, но форму можно отправить
-    #    и напрямую.
-    if not scope.can_manage(composition.department_id):
+    if not scope.can_manage(department_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Подразделение вне вашей области управления",
         )
 
-    # 4. Шифр: непустой. Уникальность обеспечивает БД — см. шаг 9.
+    # 3. Шифр: непустой. Уникальность обеспечивает БД — см. шаг 7.
     code = marka_full.strip()
     if not code:
-        return _back(project_id, mark_set.composition_id, "empty")
+        return _back(project_id, composition_id, "empty")
 
-    # 5. Статус: значение из справочника, а не произвольное число.
-    #    Порядок переходов свободный — статусы пока ни на что не влияют,
-    #    и ограничение мешало бы исправлять ошибки.
-    status_exists = (
-        await db.execute(select(SetStatus.id).where(SetStatus.id == status_id))
-    ).scalar_one_or_none()
+    # 4. Дата выпуска: не позже сегодняшней — выпуск в будущем
+    #    невозможен по смыслу. Неразборчивая дата — понятное сообщение.
+    try:
+        release_date = _form_date(released_on)
+    except ValueError:
+        return _back(project_id, composition_id, "release_date")
 
-    if status_exists is None:
-        return _back(project_id, mark_set.composition_id, "status")
+    if release_date is not None and release_date > date.today():
+        return _back(project_id, composition_id, "release_future")
 
-    # 6. Адресат задания. Поле есть всегда (галочка лишь прячет его),
+    # 5. Адресат задания. Поле есть всегда (галочка лишь прячет его),
     #    поэтому пустое значение означает «это обычный комплект».
     recipient_id = _form_int(recipient_composition_id)
 
     if recipient_id is not None:
-        if recipient_id == mark_set.composition_id:
-            return _back(project_id, mark_set.composition_id, "self")
+        if recipient_id == composition_id:
+            return _back(project_id, composition_id, "self")
 
         recipient = (
             await db.execute(
@@ -593,54 +624,24 @@ async def planner_update_set(
         ).scalar_one_or_none()
 
         if recipient is None:
-            return _back(project_id, mark_set.composition_id, "recipient")
+            return _back(project_id, composition_id, "recipient")
 
-    # 7. Исполнитель — три случая, и различие принципиально.
-    if id_executor is None:
-        # Поля нет: кнопку «Сменить» не нажимали. Значение сохраняется
-        # как есть. Именно этот случай защищает шифры уволенных: их
-        # исполнителя нет в списке, и обнулить его случайно нельзя.
-        new_executor_id = mark_set.id_executor
-    else:
-        new_executor_id = _form_int(id_executor)
-
-        # Назначение нового: сотрудник обязан числиться в подразделении
-        # ЭТОЙ строки состава на сегодня.
-        if new_executor_id is not None:
-            today = date.today()
-            belongs = (
-                await db.execute(
-                    select(EmployeeAssignment.id).where(
-                        EmployeeAssignment.employee_id == new_executor_id,
-                        EmployeeAssignment.department_id
-                        == composition.department_id,
-                        EmployeeAssignment.valid_from <= today,
-                        (EmployeeAssignment.valid_to.is_(None))
-                        | (EmployeeAssignment.valid_to >= today),
-                    )
-                )
-            ).scalar_one_or_none()
-
-            if belongs is None:
-                return _back(project_id, mark_set.composition_id, "executor")
-
-    # 8. Присваиваем. Объект уже в сессии — отдельный UPDATE не нужен,
+    # 6. Присваиваем. Объект уже в сессии — отдельный UPDATE не нужен,
     #    SQLAlchemy соберёт его сам при commit по изменённым полям.
     mark_set.marka_full = code
-    mark_set.status_id = status_id
-    mark_set.id_executor = new_executor_id
+    mark_set.released_on = release_date
     mark_set.recipient_composition_id = recipient_id
 
-    # 9. marka_full уникален ПО ВСЕЙ БАЗЕ. Переименование в уже занятый
+    # 7. marka_full уникален ПО ВСЕЙ БАЗЕ. Переименование в уже занятый
     #    шифр даёт SQLSTATE 23505 — перехватываем, иначе 500 вместо
     #    объяснения.
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        return _back(project_id, mark_set.composition_id, "duplicate")
+        return _back(project_id, composition_id, "duplicate")
 
-    return _back(project_id, mark_set.composition_id, None)
+    return _back(project_id, composition_id, None)
 
 
 @router.post(
@@ -657,24 +658,19 @@ async def planner_delete_set(
 ) -> RedirectResponse:
     """Удаляет шифр, по которому ничего не делалось.
 
-    Удалять можно только ошибочно заведённый шифр: без плана, без факта и
-    не выпущенный. Всё остальное — через статус «Выпущен» или, в будущем,
-    через администратора данных.
+    Удалять можно только ошибочно заведённый шифр: не выпущенный, и ни
+    у одного его пакета нет ни плана, ни факта. Всё остальное — через
+    выпуск или, в будущем, через администратора данных.
 
-    Внешние ключи work_plan и fact_calendar_cells на шифр — CASCADE, и это
-    решение сохраняется: администратору понадобится удалять шифры вместе
-    с историей одной операцией. Поэтому запрет «план и факт не трогать»
+    Внешние ключи на шифр и на пакеты — CASCADE, и это решение
+    сохраняется: администратору понадобится удалять шифры вместе с
+    историей одной операцией. Поэтому запрет «план и факт не трогать»
     держит этот роут, а не схема.
     """
     # 1. Шифр существует в этом проекте — и СРАЗУ блокируется FOR UPDATE.
-    #
-    #    Зачем блокировка. Между проверкой «факта нет» (шаг 5) и DELETE
-    #    инженер может поставить отметку, и каскад унёс бы её молча.
-    #    Вставка в fact_calendar_cells и в work_plan проверяет внешний
-    #    ключ, беря на строку шифра FOR KEY SHARE — а она конфликтует с
-    #    нашим FOR UPDATE. Конкурент дождётся конца транзакции и получит
-    #    ошибку внешнего ключа (шифра уже нет) вместо тихой потери.
-    #
+    #    Новый пакет под этим шифром проверяет внешний ключ, беря на
+    #    строку шифра FOR KEY SHARE, — она конфликтует с нашим FOR UPDATE,
+    #    и пакет не появится между проверками и удалением.
     #    of=ProjectMarkSet: блокируем только шифр, строку состава — нет.
     mark_set = (
         await db.execute(
@@ -700,7 +696,20 @@ async def planner_delete_set(
     # Нужен для редиректа: после DELETE объект читать уже нельзя.
     composition_id = mark_set.composition_id
 
-    # 2. Область управления. Строка шифра чужого бюро не кликабельна, но
+    # 2. Пакеты шифра — тоже FOR UPDATE. Без этого защита от гонки не
+    #    работает: план и факт ссылаются на ПАКЕТ, и вставка отметки
+    #    берёт FOR KEY SHARE на строку пакета, а не шифра. Блокировка
+    #    одного шифра её не остановила бы: инженер поставил бы отметку
+    #    между проверкой «факта нет» и DELETE, и каскад унёс бы её молча.
+    #    С блокировкой пакетов конкурент ждёт конца нашей транзакции и
+    #    получает ошибку внешнего ключа вместо тихой потери.
+    await db.execute(
+        select(WorkPackage.id)
+        .where(WorkPackage.mark_set_id == set_id)
+        .with_for_update()
+    )
+
+    # 3. Область управления. Строка шифра чужого бюро не кликабельна, но
     #    форму можно отправить и напрямую.
     department_id = (
         await db.execute(
@@ -716,19 +725,17 @@ async def planner_delete_set(
             detail="Подразделение вне вашей области управления",
         )
 
-    # 3. Выпущенный шифр — документ, сданный заказчику. Не удаляется
+    # 4. Выпущенный шифр — документ, сданный заказчику. Не удаляется
     #    никогда, ни с историей, ни без.
-    if mark_set.status_id == STATUS_SET_RELEASED:
+    if mark_set.released_on is not None:
         return _back(project_id, composition_id, "released")
 
-    # 4. План. Проверяем ячейки, а не строки work_plan: владелец истины
-    #    плана — plan_calendar_cells, work_plan производный. Пустой
-    #    work_plan без ячеек планом не считается и уйдёт каскадом.
+    # 5. План хоть одного пакета шифра.
     has_plan = (
         await db.execute(
             select(PlanCalendarCell.id)
-            .join(WorkPlan, WorkPlan.id == PlanCalendarCell.work_plan_id)
-            .where(WorkPlan.mark_set_id == set_id)
+            .join(WorkPackage, WorkPackage.id == PlanCalendarCell.package_id)
+            .where(WorkPackage.mark_set_id == set_id)
             .limit(1)
         )
     ).scalar_one_or_none()
@@ -736,12 +743,14 @@ async def planner_delete_set(
     if has_plan is not None:
         return _back(project_id, composition_id, "has_plan")
 
-    # 5. Факт — свидетельство инженера о своей работе, восстановить его
-    #    неоткуда. Шифр с фактом удаляет только администратор данных.
+    # 6. Факт хоть одного пакета шифра — свидетельство инженера о своей
+    #    работе, восстановить его неоткуда. Шифр с фактом удаляет только
+    #    администратор данных.
     has_fact = (
         await db.execute(
             select(FactCalendarCell.id)
-            .where(FactCalendarCell.mark_set_id == set_id)
+            .join(WorkPackage, WorkPackage.id == FactCalendarCell.package_id)
+            .where(WorkPackage.mark_set_id == set_id)
             .limit(1)
         )
     ).scalar_one_or_none()
@@ -749,14 +758,304 @@ async def planner_delete_set(
     if has_fact is not None:
         return _back(project_id, composition_id, "has_fact")
 
-    # 6. Удаление. Core-запросом, а не session.delete(): ORM-удаление
-    #    стало бы разбирать связи объекта (коллекцию mark_sets у строки
-    #    состава), а каскад по работе и факту и так делает база.
+    # 7. Удаление. Core-запросом, а не session.delete(): ORM-удаление
+    #    стало бы разбирать связи объекта, а каскад на пакеты, а с ними
+    #    на план и факт, делает база.
     await db.execute(delete(ProjectMarkSet).where(ProjectMarkSet.id == set_id))
     await db.commit()
 
     return _back(project_id, composition_id, None)
 
+
+@dataclass(frozen=True)
+class PackageInProject:
+    """Пакет, найденный в проекте, с тем, что нужно для проверок."""
+
+    package: WorkPackage
+    composition_id: int
+    department_id: int
+
+
+async def _load_package_in_project(
+    db: AsyncSession,
+    project_id: int,
+    package_id: int,
+    *,
+    lock: bool = False,
+) -> PackageInProject:
+    """Пакет вместе со строкой состава его шифра или 404.
+
+    Проверка «шифр пакета лежит в этом проекте» обязательна: package_id
+    приходит из адреса, и без неё можно было бы править пакет чужого
+    проекта, подставив другой id.
+
+    lock=True — пакет блокируется FOR UPDATE. Нужно удалению: вставка
+    плановой или фактической ячейки берёт FOR KEY SHARE на строку пакета
+    и будет ждать, пока мы проверяем «плана и факта нет» и удаляем.
+    """
+    stmt = (
+        select(
+            WorkPackage,
+            ProjectComposition.id,
+            ProjectComposition.department_id,
+        )
+        .join(ProjectMarkSet, ProjectMarkSet.id == WorkPackage.mark_set_id)
+        .join(
+            ProjectComposition,
+            ProjectComposition.id == ProjectMarkSet.composition_id,
+        )
+        .where(
+            WorkPackage.id == package_id,
+            ProjectComposition.project_id == project_id,
+        )
+    )
+    if lock:
+        # of=WorkPackage: блокируем только пакет, шифр и состав — нет.
+        stmt = stmt.with_for_update(of=WorkPackage)
+
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Пакет не найден",
+        )
+    package, composition_id, department_id = row
+    return PackageInProject(package, composition_id, department_id)
+
+
+async def _executor_belongs(
+    db: AsyncSession, employee_id: int, department_id: int
+) -> bool:
+    """Числится ли сотрудник в подразделении на сегодня.
+
+    Без этой проверки в форму можно подставить любой id и назначить
+    пакет сотруднику чужого бюро. Правило «назначение действует на дату»
+    берётся из core/assignments.py — там оно записано один раз.
+    """
+    found = (
+        await db.execute(
+            select(EmployeeAssignment.id).where(
+                EmployeeAssignment.employee_id == employee_id,
+                EmployeeAssignment.department_id == department_id,
+                is_current_assignment(date.today()),
+            )
+        )
+    ).first()
+    return found is not None
+
+
+@router.post(
+    "/planner/works/{project_id}/sets/{set_id}/packages",
+    tags=["Web Планировщик"],
+    summary="Создание пакета работ в комплекте",
+)
+async def planner_create_package(
+    project_id: int,
+    set_id: int,
+    user: Annotated[User, Depends(RequirePermissionHtml(SET_MANAGE_PERMISSION))],
+    scope: Annotated[Scope, Depends(get_scope_html)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    name: Annotated[str, Form()],
+    description: Annotated[Optional[str], Form()] = None,
+    executor_id: Annotated[Optional[str], Form()] = None,
+) -> RedirectResponse:
+    """Заводит пакет работ в комплекте своего бюро.
+
+    Начальник называет пакет по смыслу работы («поддоны», «опросник»,
+    «полный») и может сразу назначить исполнителя — или позже: пакет без
+    исполнителя законен, его только нельзя спланировать.
+
+    Статус не задаётся: новый пакет — «В работе» по умолчанию базы, пакет
+    создают уже для планирования.
+    """
+    # 1. Шифр существует и лежит в этом проекте; отдел — для области.
+    row = (
+        await db.execute(
+            select(ProjectMarkSet.composition_id, ProjectComposition.department_id)
+            .join(
+                ProjectComposition,
+                ProjectComposition.id == ProjectMarkSet.composition_id,
+            )
+            .where(
+                ProjectMarkSet.id == set_id,
+                ProjectComposition.project_id == project_id,
+            )
+        )
+    ).one_or_none()
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Шифр не найден",
+        )
+    composition_id, department_id = row
+
+    # 2. Область управления.
+    if not scope.can_manage(department_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Подразделение вне вашей области управления",
+        )
+
+    # 3. Название непустое. То же запрещает и CHECK в базе — проверяем
+    #    здесь, чтобы вернуть понятное сообщение, а не 500.
+    package_name = name.strip()
+    if not package_name:
+        return _back(project_id, composition_id, "package_empty")
+
+    # 4. Исполнитель, если выбран, числится в бюро этой марки.
+    new_executor = _form_int(executor_id)
+    if new_executor is not None and not await _executor_belongs(
+        db, new_executor, department_id
+    ):
+        return _back(project_id, composition_id, "executor")
+
+    db.add(
+        WorkPackage(
+            mark_set_id=set_id,
+            name=package_name,
+            description=(description or "").strip() or None,
+            executor_id=new_executor,
+        )
+    )
+
+    # 5. Название уникально в пределах шифра без учёта регистра — это
+    #    держит уникальный индекс базы. Повтор даёт SQLSTATE 23505.
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return _back(project_id, composition_id, "package_duplicate")
+
+    return _back(project_id, composition_id, None)
+
+
+@router.post(
+    "/planner/works/{project_id}/packages/{package_id}",
+    tags=["Web Планировщик"],
+    summary="Сохранение карточки пакета работ",
+)
+async def planner_update_package(
+    project_id: int,
+    package_id: int,
+    user: Annotated[User, Depends(RequirePermissionHtml(SET_MANAGE_PERMISSION))],
+    scope: Annotated[Scope, Depends(get_scope_html)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    name: Annotated[str, Form()],
+    status_id: Annotated[int, Form()],
+    description: Annotated[Optional[str], Form()] = None,
+    # ВАЖНО: None — «поле не пришло вовсе», пустая строка — «пришло
+    # пустым». Для исполнителя это разные команды: не трогать против
+    # снять. Поле отправляется только после нажатия «Сменить», поэтому
+    # карточка пакета уволенного сохраняется без потери исполнителя.
+    executor_id: Annotated[Optional[str], Form()] = None,
+) -> RedirectResponse:
+    """Правит название, описание, статус и исполнителя пакета.
+
+    Статус меняет и начальник, не только исполнитель: иначе пакет
+    уволенного или заболевшего застрял бы до правки администратором.
+
+    Смена исполнителя здесь — только поле пакета. Что делать с уже
+    разложенным планом прежнего исполнителя, решает планирование:
+    прошлые ячейки остаются за ним, будущие перекладываются.
+    """
+    found = await _load_package_in_project(db, project_id, package_id)
+    package = found.package
+
+    if not scope.can_manage(found.department_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Подразделение вне вашей области управления",
+        )
+
+    package_name = name.strip()
+    if not package_name:
+        return _back(project_id, found.composition_id, "package_empty")
+
+    # Статус — значение из справочника, а не произвольное число.
+    known_status = (
+        await db.execute(select(PackageStatus.id).where(PackageStatus.id == status_id))
+    ).first()
+    if known_status is None:
+        return _back(project_id, found.composition_id, "status")
+
+    # Исполнитель — три случая, и различие принципиально.
+    if executor_id is None:
+        # Поля нет: «Сменить» не нажимали — значение остаётся как есть.
+        new_executor = package.executor_id
+    else:
+        new_executor = _form_int(executor_id)
+        if new_executor is not None and not await _executor_belongs(
+            db, new_executor, found.department_id
+        ):
+            return _back(project_id, found.composition_id, "executor")
+
+    package.name = package_name
+    package.description = (description or "").strip() or None
+    package.status_id = status_id
+    package.executor_id = new_executor
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return _back(project_id, found.composition_id, "package_duplicate")
+
+    return _back(project_id, found.composition_id, None)
+
+
+@router.post(
+    "/planner/works/{project_id}/packages/{package_id}/delete",
+    tags=["Web Планировщик"],
+    summary="Удаление пакета работ без плана и факта",
+)
+async def planner_delete_package(
+    project_id: int,
+    package_id: int,
+    user: Annotated[User, Depends(RequirePermissionHtml(SET_MANAGE_PERMISSION))],
+    scope: Annotated[Scope, Depends(get_scope_html)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RedirectResponse:
+    """Удаляет пакет, по которому ничего не делалось.
+
+    Правило то же, что у шифра: ни плана, ни факта. Внешние ключи плана
+    и факта на пакет — CASCADE, поэтому запрет держит этот роут.
+    """
+    # Пакет блокируется сразу: вставка плана или факта на него ждёт конца
+    # нашей транзакции и получает ошибку внешнего ключа вместо тихой
+    # потери, если пакет к тому моменту удалён.
+    found = await _load_package_in_project(db, project_id, package_id, lock=True)
+
+    if not scope.can_manage(found.department_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Подразделение вне вашей области управления",
+        )
+
+    has_plan = (
+        await db.execute(
+            select(PlanCalendarCell.id)
+            .where(PlanCalendarCell.package_id == package_id)
+            .limit(1)
+        )
+    ).first()
+    if has_plan is not None:
+        return _back(project_id, found.composition_id, "package_has_plan")
+
+    has_fact = (
+        await db.execute(
+            select(FactCalendarCell.id)
+            .where(FactCalendarCell.package_id == package_id)
+            .limit(1)
+        )
+    ).first()
+    if has_fact is not None:
+        return _back(project_id, found.composition_id, "package_has_fact")
+
+    await db.execute(delete(WorkPackage).where(WorkPackage.id == package_id))
+    await db.commit()
+
+    return _back(project_id, found.composition_id, None)
 
 async def _load_manageable_departments(
     db: AsyncSession,

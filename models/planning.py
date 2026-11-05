@@ -2,23 +2,21 @@
 """ORM-модели раздела «Планирование».
 
 Модели построены строго по DDL базы (правило 26 — схема как источник
-истины), сверенному по дампу от 02.09.2026. Семь таблиц образуют
-логический модуль «план и факт занятости»:
+истины). Шесть таблиц образуют логический модуль «план и факт занятости»:
 
     DayType            — справочник типов дня (рабочий/выходной/сокращённый)
     ProductionCalendar — производственный календарь: одна строка = один день
     AbsenceType        — справочник причин неявки (отпуск, больничный, …)
     AbsencePeriod      — период неявки конкретного работника
-    WorkPlan           — шапка плана: шифр + исполнитель + границы
-    PlanCalendarCell   — плановая ячейка: один инженеро-день под шифр
+    PlanCalendarCell   — плановая ячейка: один инженеро-день на пакет работ
     FactCalendarCell   — фактическая ячейка: отметка работника о работе
 
-Ключевая особенность модуля: владелец истины — ЯЧЕЙКИ, а не шапка.
-Начальник раскладывает дни вручную в календарной сетке, а start_date,
-end_date и work_days вычисляются из положенного. Обратный вывод
-невозможен: раскладка дырявая (пропускает выходные, отсутствия и дни,
-занятые другими шифрами), и повторный прогон алгоритма в другой момент
-времени даст другой набор дат при тех же границах.
+План и факт симметричны: обе ячейки ссылаются на пакет работ
+(WorkPackage, app/models/composition.py) напрямую. Шапки плана нет —
+план это только ячейки. Первый день, последний день и число дней
+пакета вычисляются запросом из положенного. Обратный вывод невозможен:
+раскладка дырявая (пропускает выходные, отсутствия и дни, занятые
+другими пакетами).
 
 Отличие от absence_periods, где хранится именно диапазон: неявка
 непрерывна, поэтому её проекция на дни вычисляется однозначно и таблица
@@ -26,11 +24,11 @@ end_date и work_days вычисляются из положенного. Обр
 
 Все FK и ondelete зеркалят БД буквально: где в схеме RESTRICT, там
 RESTRICT и в модели. Расхождение здесь особенно опасно — ложный CASCADE
-создал бы уверенность, что удаление плана уносит ячейки, и при
-autogenerate откатил бы защиту в самой БД.
+создал бы уверенность, что удаление уносит зависимые строки, и при
+autogenerate изменил бы поведение самой БД.
 """
 from datetime import date, datetime
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import (
     Boolean,
@@ -54,7 +52,7 @@ from app.models.base import Base
 if TYPE_CHECKING:
     # Только для аннотаций: реальный импорт создал бы цикл, а строковые
     # аннотации SQLAlchemy разрешает по имени класса в общем реестре.
-    from app.models.composition import ProjectMarkSet
+    from app.models.composition import WorkPackage
     from app.models.employee import Employee
 
 
@@ -241,123 +239,24 @@ class AbsencePeriod(Base):
         )
 
 
-class WorkPlan(Base):
-    """Шапка плана: связка «шифр + исполнитель» и границы раскладки.
-
-    ВАЖНО: это производная запись, а не задание. Владелец истины —
-    plan_calendar_cells. Начальник раскладывает дни в сетке, после чего
-    start_date / end_date / work_days пересчитываются из ячеек: первый
-    день, последний день, количество. Обратный вывод невозможен —
-    раскладка дырявая.
-
-    Отсюда же правило записи: сначала пишем ячейки, затем одним UPDATE
-    ставим границы и updated_at. Порядок обязателен, пока жив триггер
-    trg_update_end_date на plan_calendar_cells (он пересчитывает
-    end_date построчно и затрёт значение, записанное до вставки).
-    Триггер снимается в шаге 6 вместе с fill_plan_cells.
-
-    Статус: draft в схеме есть, но не используется — сохранение сразу
-    создаёт confirmed. archived оставлен под перепланирование.
-    """
-
-    __tablename__ = "work_plan"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-
-    # CASCADE: удаление шифра уносит его план целиком — плана без шифра
-    # не бывает.
-    mark_set_id: Mapped[int] = mapped_column(
-        ForeignKey("project_mark_sets.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-
-    # RESTRICT: работника нельзя удалить, пока на нём висят планы.
-    # NOT NULL — плана без человека не существует, поэтому шифр без
-    # назначенного исполнителя спланировать нельзя.
-    employee_id: Mapped[int] = mapped_column(
-        ForeignKey("employees.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-
-    # Границы. start_date и work_days объявлены NOT NULL в БД, поэтому
-    # заполняются в том же запросе, что создаёт план. end_date nullable:
-    # исторически его ставил триггер после вставки первой ячейки.
-    start_date: Mapped[date] = mapped_column(Date, nullable=False)
-    work_days: Mapped[int] = mapped_column(nullable=False)
-    end_date: Mapped[Optional[date]] = mapped_column(Date)
-
-    status: Mapped[str] = mapped_column(
-        String(20),
-        server_default=text("'draft'::character varying"),
-        nullable=False,
-    )
-
-    created_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-    # onupdate НЕ ставим: штамп проставляет пишущая сторона явно, тем же
-    # UPDATE, что пересчитывает границы. Так поле переживёт снятие
-    # триггера без осиротения.
-    updated_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True)
-    )
-
-    # passive_deletes=True: удаление плана каскадит на ячейки силами БД,
-    # ORM не должна вычитывать их ради построчного DELETE.
-    cells: Mapped[List["PlanCalendarCell"]] = relationship(
-        back_populates="work_plan",
-        lazy="raise_on_sql",
-        passive_deletes=True,
-    )
-
-    mark_set: Mapped["ProjectMarkSet"] = relationship(lazy="raise_on_sql")
-    employee: Mapped["Employee"] = relationship(lazy="raise_on_sql")
-
-    __table_args__ = (
-        CheckConstraint(
-            "status IN ('draft', 'confirmed', 'archived')",
-            name="work_plan_status_check",
-        ),
-        CheckConstraint("work_days > 0", name="work_plan_work_days_check"),
-        # Один активный план на шифр. Частичный уникальный индекс:
-        # archived-планы в него не попадают, поэтому история
-        # перепланирований накапливается без конфликтов.
-        # postgresql_where зеркалит WHERE из DDL — без него autogenerate
-        # увидит расхождение и предложит пересоздать индекс.
-        Index(
-            "idx_one_active_plan",
-            "mark_set_id",
-            unique=True,
-            postgresql_where=text("status IN ('draft', 'confirmed')"),
-        ),
-        Index("idx_work_plan_employee", "employee_id"),
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"WorkPlan(id={self.id!r}, mark_set_id={self.mark_set_id!r}, "
-            f"employee_id={self.employee_id!r}, status={self.status!r})"
-        )
-
 
 class PlanCalendarCell(Base):
-    """Плановая ячейка: один инженеро-день, отданный под один шифр.
+    """Плановая ячейка: один инженеро-день, отданный под один пакет работ.
 
-    Атом планирования. Дробных долей дня нет: день либо занят шифром
+    Атом планирования. Дробных долей дня нет: день либо занят пакетом
     целиком, либо свободен.
 
     unique_plan_cell (employee_id, work_date) — главное ограничение
-    модуля. Оно физически запрещает положить два шифра на один день
+    модуля. Оно физически запрещает положить два пакета на один день
     одного человека, независимо от того, что нарисовано на экранах.
     Именно на него опирается стратегия разрешения конфликтов при
     одновременной работе двух начальников: конкурент получает
     IntegrityError на сохранении, а не тихую перезапись.
 
-    employee_id продублирован здесь при живом work_plan.employee_id
-    намеренно — иначе ограничение выше пришлось бы проверять join'ом,
-    а UNIQUE так не умеет. Следствие: при смене исполнителя обе таблицы
-    надо править согласованно.
+    employee_id хранится в ячейке, а не берётся из пакета: ограничение
+    выше join'ом не проверить — UNIQUE так не умеет. И ячейка помнит,
+    кто должен был работать в тот день: при смене исполнителя пакета
+    прошлые ячейки остаются за прежним человеком.
 
     work_date ссылается на production_calendar — ячейку нельзя создать
     на дату вне заполненного календаря.
@@ -367,12 +266,13 @@ class PlanCalendarCell(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
-    # CASCADE: удаление плана уносит его ячейки силами БД.
-    work_plan_id: Mapped[int] = mapped_column(
-        ForeignKey("work_plan.id", ondelete="CASCADE"),
+    # CASCADE: удаление пакета уносит его план силами БД.
+    package_id: Mapped[int] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="CASCADE"),
         nullable=False,
     )
 
+    # RESTRICT: работника нельзя удалить, пока на нём есть план.
     employee_id: Mapped[int] = mapped_column(
         ForeignKey("employees.id", ondelete="RESTRICT"),
         nullable=False,
@@ -389,9 +289,7 @@ class PlanCalendarCell(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    work_plan: Mapped["WorkPlan"] = relationship(
-        back_populates="cells", lazy="raise_on_sql"
-    )
+    package: Mapped["WorkPackage"] = relationship(lazy="raise_on_sql")
 
     __table_args__ = (
         UniqueConstraint(
@@ -401,12 +299,14 @@ class PlanCalendarCell(Base):
         # он есть в БД — объявляем faithful, иначе autogenerate предложит
         # его удалить.
         Index("idx_plan_cells_employee_date", "employee_id", "work_date"),
-        Index("idx_plan_cells_work_plan", "work_plan_id"),
+        # Ячейки пакета: сводка «Дни / Срок», готовность, удаление шифра.
+        Index("idx_plan_cells_package", "package_id"),
     )
 
     def __repr__(self) -> str:
         return (
             f"PlanCalendarCell(id={self.id!r}, "
+            f"package_id={self.package_id!r}, "
             f"employee_id={self.employee_id!r}, "
             f"work_date={self.work_date!r})"
         )
@@ -415,25 +315,25 @@ class PlanCalendarCell(Base):
 class FactCalendarCell(Base):
     """Фактическая ячейка: отметка работника о работе за день.
 
-    Симметрична плановой, но ссылается на шифр напрямую (mark_set_id),
-    а не на план. Так и должно быть: факт возможен там, где плана не
-    было вовсе — «факт вне плана» на макете сетки.
+    Симметрична плановой: тоже ссылается на пакет работ. Факт возможен
+    там, где плана не было вовсе — «факт вне плана» на сетке, — и не
+    обязательно от исполнителя пакета: подмена живёт только в факте.
 
     is_auto — отметка проставлена системой, а не человеком.
     override_reason — пояснение к ручному исправлению администратором.
     is_retro — отметка задним числом; вычисляется триггером БД.
 
     unique_fact_cell (employee_id, work_date): за день можно отчитаться
-    ровно один раз, по одному шифру.
+    ровно один раз, по одному пакету.
     """
 
     __tablename__ = "fact_calendar_cells"
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
-    # CASCADE: удаление шифра уносит отметки по нему.
-    mark_set_id: Mapped[int] = mapped_column(
-        ForeignKey("project_mark_sets.id", ondelete="CASCADE"),
+    # CASCADE: удаление пакета уносит отметки по нему.
+    package_id: Mapped[int] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -453,7 +353,6 @@ class FactCalendarCell(Base):
 
     override_reason: Mapped[Optional[str]] = mapped_column(Text)
 
-
     # Ретроввод: отметка поставлена или перенесена после окончания
     # work_date. Значение вычисляет триггер trg_fact_check_absence, а не
     # приложение — поэтому server_default на вставку и FetchedValue на
@@ -470,19 +369,20 @@ class FactCalendarCell(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    mark_set: Mapped["ProjectMarkSet"] = relationship(lazy="raise_on_sql")
+    package: Mapped["WorkPackage"] = relationship(lazy="raise_on_sql")
 
     __table_args__ = (
         UniqueConstraint(
             "employee_id", "work_date", name="unique_fact_cell"
         ),
         Index("idx_fact_cells_employee_date", "employee_id", "work_date"),
-        Index("idx_fact_cells_mark_set", "mark_set_id"),
+        # Отметки пакета: готовность, остаток, удаление шифра.
+        Index("idx_fact_cells_package", "package_id"),
     )
 
     def __repr__(self) -> str:
         return (
             f"FactCalendarCell(id={self.id!r}, "
-            f"mark_set_id={self.mark_set_id!r}, "
+            f"package_id={self.package_id!r}, "
             f"work_date={self.work_date!r})"
         )
