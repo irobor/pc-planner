@@ -8,8 +8,8 @@
 {% block section_content %}
 
 
-{# Ошибки создания приходят кодом в строке запроса: роут делает редирект
-   на 303, чтобы обновление страницы не повторяло отправку формы, а текст
+{# Ошибки приходят кодом в строке запроса: роут делает редирект на 303,
+   чтобы обновление страницы не повторяло отправку формы, а текст
    собирается здесь — так его не приходится экранировать в URL. #}
 {% if request.query_params.get("error") %}
 {% set error_code = request.query_params.get("error") %}
@@ -26,14 +26,30 @@
     Исполнитель не числится в подразделении этой марки.
   {% elif error_code == "status" %}
     Указан неизвестный статус.
+  {% elif error_code == "release_future" %}
+    Дата выпуска не может быть позже сегодняшней.
+  {% elif error_code == "release_date" %}
+    Не удалось разобрать дату выпуска.
   {% elif error_code == "released" %}
     Выпущенный шифр удалить нельзя: документ сдан заказчику.
   {% elif error_code == "has_plan" %}
-    У шифра есть план. Снимите плановые дни на экране «План», затем удаляйте.
+    У одного из пакетов шифра есть план. Снимите плановые дни на экране
+    «План», затем удаляйте.
   {% elif error_code == "has_fact" %}
-    По шифру уже отмечена работа. Шифр с фактом удаляет только администратор данных.  
+    По одному из пакетов шифра уже отмечена работа. Шифр с фактом удаляет
+    только администратор данных.
+  {% elif error_code == "package_empty" %}
+    Название пакета не может быть пустым.
+  {% elif error_code == "package_duplicate" %}
+    В этом шифре уже есть пакет с таким названием.
+  {% elif error_code == "package_has_plan" %}
+    У пакета есть план. Снимите плановые дни на экране «План», затем
+    удаляйте.
+  {% elif error_code == "package_has_fact" %}
+    По пакету уже отмечена работа. Пакет с фактом удаляет только
+    администратор данных.
   {% else %}
-    Не удалось создать шифр.
+    Не удалось выполнить действие.
   {% endif %}
   <button type="button" class="btn-close" data-bs-dismiss="alert"
           aria-label="Закрыть"></button>
@@ -90,8 +106,8 @@
   </thead>
   <tbody>
     {% for root in tree %}
-                {{ tree_table.render_dept_rows(root, manageable_ids, expanded_ids,
-                                       can_manage_sets, plan_summary, status_names) }}
+      {{ tree_table.render_dept_rows(root, manageable_ids, expanded_ids,
+                                   can_manage_sets, package_summary, set_summary) }}
     {% endfor %}
   </tbody>
 </table>
@@ -132,27 +148,9 @@
                    name="marka_full" required maxlength="255"
                    placeholder="053-22-14а-ЭМ">
             <div class="form-text">
-              Шифр должен быть уникальным во всей системе.
+              Шифр должен быть уникальным во всей системе. Исполнителей
+              назначают пакетам — их заводят следом под шифром.
             </div>
-          </div>
-
-          <div class="mb-3">
-            <label for="setExecutor" class="form-label">
-              Исполнитель <span class="text-muted">— необязательно</span>
-            </label>
-            {# Назначение отделено от планирования: шифр может висеть
-               без исполнителя, пока начальник не решит, кому отдать.
-               Скрипт оставляет в списке только сотрудников того бюро,
-               которому принадлежит марка. #}
-            <select class="form-select" id="setExecutor" name="id_executor">
-              <option value="">— не назначен —</option>
-              {% for executor in executors %}
-              <option value="{{ executor.id }}"
-                      data-department-id="{{ executor.department_id }}">
-                {{ executor.full_name }}
-              </option>
-              {% endfor %}
-            </select>
           </div>
 
           <div class="form-check mb-3">
@@ -199,11 +197,9 @@
 {# намеренно: шифров у бюро десяток, и столько же кнопок превратили бы #}
 {# дерево в частокол.                                                  #}
 {#                                                                     #}
-{# Исполнитель по умолчанию НЕ редактируется: он показан текстом, а    #}
-{# поле формы появляется только по кнопке «Сменить». Это защита от     #}
-{# тихой порчи данных — исполнитель шифра может быть уволен, и тогда   #}
-{# его нет в списке живых сотрудников. Открыв карточку ради статуса и  #}
-{# сохранив, начальник обнулил бы исполнителя, не заметив этого.       #}
+{# У комплекта нет ни исполнителя, ни статуса хода работ — они у       #}
+{# пакетов. Здесь правится сам документ: обозначение, адресат задания  #}
+{# и дата выпуска.                                                     #}
 {# ------------------------------------------------------------------ #}
 <div class="modal fade" id="editSetModal" tabindex="-1"
      aria-labelledby="editSetModalLabel" aria-hidden="true">
@@ -233,38 +229,18 @@
           </div>
 
           <div class="mb-3">
-            <label class="form-label d-block">Исполнитель</label>
-            {# Текущее значение текстом. Поле формы здесь отсутствует —
-               пока не нажата «Сменить», id_executor не отправляется, и
-               сервер значение не трогает. #}
-            <div id="editExecutorView">
-              <span id="editExecutorName" class="me-2"></span>
-              <button type="button" class="btn btn-outline-secondary btn-sm"
-                      id="editExecutorChange">Сменить</button>
+            <label for="editReleasedOn" class="form-label">Дата выпуска</label>
+            {# Выпуск — дата, а не статус: ставит начальник вручную, при
+               любой готовности пакетов — решение за ним. Пустое поле —
+               комплект не выпущен; очистить дату значит снять выпуск.
+               max — подсказка браузеру; сервер проверяет «не позже
+               сегодня» сам. #}
+            <input type="date" class="form-control" id="editReleasedOn"
+                   name="released_on" max="{{ today.isoformat() }}">
+            <div class="form-text">
+              Пусто — не выпущен. Готовность пакетов:
+              <span id="editReadiness"></span>.
             </div>
-            {# Список живых сотрудников бюро. Появляется по кнопке;
-               скрипт фильтрует его по отделу марки. #}
-            <select class="form-select d-none" id="editExecutorSelect"
-                    name="id_executor">
-              <option value="">— не назначен —</option>
-              {% for executor in executors %}
-              <option value="{{ executor.id }}"
-                      data-department-id="{{ executor.department_id }}">
-                {{ executor.full_name }}
-              </option>
-              {% endfor %}
-            </select>
-          </div>
-
-          <div class="mb-3">
-            <label for="editStatus" class="form-label">Статус</label>
-            {# Порядок статусов свободный: они пока ни на что не влияют,
-               а ограничение переходов мешало бы исправлять ошибки. #}
-            <select class="form-select" id="editStatus" name="status_id">
-              {% for st in set_statuses %}
-              <option value="{{ st.id }}">{{ st.name }}</option>
-              {% endfor %}
-            </select>
           </div>
 
           <div class="form-check mb-3">
@@ -287,11 +263,6 @@
               {% endfor %}
             </select>
           </div>
-
-          {# План — справочно. work_plan ещё не реализован. #}
-          <div class="border-top pt-3">
-            <span class="text-muted small">План: не спланирован</span>
-          </div>
         </div>
 
         <div class="modal-footer">
@@ -304,10 +275,178 @@
              (required) не блокировало удаление. Поля правки при этом тоже
              уходят на сервер, роут удаления их не читает.
 
-             Кнопка видна всегда: можно ли удалять (план, факт, статус),
-             решает сервер и объясняет отказ сообщением. #}
+             Кнопка видна всегда: можно ли удалять (выпуск, план и факт
+             пакетов), решает сервер и объясняет отказ сообщением. #}
           <button type="submit" class="btn btn-outline-danger me-auto"
                   id="editSetDelete" formnovalidate>Удалить</button>
+          <button type="button" class="btn btn-secondary"
+                  data-bs-dismiss="modal">Отмена</button>
+          <button type="submit" class="btn btn-primary">Сохранить</button>
+        </div>
+
+      </div>
+    </form>
+  </div>
+</div>
+{# ------------------------------------------------------------------ #}
+{# Заведение пакета работ. Одна модалка на страницу: шифр и бюро       #}
+{# подставляются при открытии из data-* кнопки «+ пакет».              #}
+{#                                                                     #}
+{# Статуса в форме нет: новый пакет — «В работе» по умолчанию базы,    #}
+{# пакет создают уже для планирования.                                 #}
+{# ------------------------------------------------------------------ #}
+<div class="modal fade" id="createPackageModal" tabindex="-1"
+     aria-labelledby="createPackageModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <form method="post" id="createPackageForm">
+      <div class="modal-content">
+
+        <div class="modal-header">
+          <h5 class="modal-title" id="createPackageModalLabel">Новый пакет</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"
+                  aria-label="Закрыть"></button>
+        </div>
+
+        <div class="modal-body">
+          <p class="text-muted small mb-3" id="createPackageSet"></p>
+
+          <div class="mb-3">
+            <label for="createPackageName" class="form-label">Название</label>
+            {# Называют по смыслу работы, а не по файлам: сколько .dwg
+               будет внутри пакета, решает исполнитель. #}
+            <input type="text" class="form-control" id="createPackageName"
+                   name="name" required maxlength="255"
+                   placeholder="поддоны, опросник, полный">
+            <div class="form-text">
+              Не делите комплект — назовите пакет «полный».
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label for="createPackageDescription" class="form-label">
+              Описание <span class="text-muted">— необязательно</span>
+            </label>
+            <textarea class="form-control" id="createPackageDescription"
+                      name="description" rows="2"></textarea>
+          </div>
+
+          <div class="mb-3">
+            <label for="createPackageExecutor" class="form-label">
+              Исполнитель <span class="text-muted">— можно назначить позже</span>
+            </label>
+            {# Пакет без исполнителя законен — его только нельзя
+               спланировать. Скрипт оставляет в списке сотрудников бюро
+               этой марки. #}
+            <select class="form-select" id="createPackageExecutor"
+                    name="executor_id">
+              <option value="">— не назначен —</option>
+              {% for executor in executors %}
+              <option value="{{ executor.id }}"
+                      data-department-id="{{ executor.department_id }}">
+                {{ executor.full_name }}
+              </option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary"
+                  data-bs-dismiss="modal">Отмена</button>
+          <button type="submit" class="btn btn-primary">Создать</button>
+        </div>
+
+      </div>
+    </form>
+  </div>
+</div>
+
+{# ------------------------------------------------------------------ #}
+{# Карточка пакета. Открывается кликом по строке пакета.               #}
+{#                                                                     #}
+{# Исполнитель по умолчанию НЕ редактируется: он показан текстом, а    #}
+{# поле формы появляется только по кнопке «Сменить». Это защита от     #}
+{# тихой порчи данных — исполнитель пакета может быть уволен, и тогда  #}
+{# его нет в списке живых сотрудников. Открыв карточку ради статуса и  #}
+{# сохранив, начальник обнулил бы исполнителя, не заметив этого.       #}
+{#                                                                     #}
+{# Статус меняет и начальник, не только исполнитель: иначе пакет       #}
+{# уволенного или заболевшего застрял бы до правки администратором.    #}
+{# ------------------------------------------------------------------ #}
+<div class="modal fade" id="editPackageModal" tabindex="-1"
+     aria-labelledby="editPackageModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <form method="post" id="editPackageForm">
+      <div class="modal-content">
+
+        <div class="modal-header">
+          <h5 class="modal-title" id="editPackageModalLabel">Пакет</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"
+                  aria-label="Закрыть"></button>
+        </div>
+
+        <div class="modal-body">
+          <p class="text-muted small mb-3" id="editPackageSet"></p>
+
+          <div class="mb-3">
+            <label for="editPackageName" class="form-label">Название</label>
+            <input type="text" class="form-control" id="editPackageName"
+                   name="name" required maxlength="255">
+          </div>
+
+          <div class="mb-3">
+            <label for="editPackageDescription" class="form-label">Описание</label>
+            <textarea class="form-control" id="editPackageDescription"
+                      name="description" rows="2"></textarea>
+          </div>
+
+          <div class="mb-3">
+            <label for="editPackageStatus" class="form-label">Статус</label>
+            {# Порядок статусов свободный: ограничение переходов мешало бы
+               исправлять ошибки и возвращать пакет на доработку.
+               Примечание к статусу показывается под списком — люди его
+               читают: «Согласование» значит «у заказчика». #}
+            <select class="form-select" id="editPackageStatus" name="status_id">
+              {% for st in package_statuses %}
+              <option value="{{ st.id }}" data-note="{{ st.note or '' }}">
+                {{ st.name }}
+              </option>
+              {% endfor %}
+            </select>
+            <div class="form-text" id="editPackageStatusNote"></div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label d-block">Исполнитель</label>
+            {# Текущее значение текстом. Поле формы здесь отсутствует —
+               пока не нажата «Сменить», executor_id не отправляется, и
+               сервер значение не трогает. #}
+            <div id="editPackageExecutorView">
+              <span id="editPackageExecutorName" class="me-2"></span>
+              <button type="button" class="btn btn-outline-secondary btn-sm"
+                      id="editPackageExecutorChange">Сменить</button>
+            </div>
+            {# Список живых сотрудников бюро. Появляется по кнопке;
+               скрипт фильтрует его по отделу марки. #}
+            <select class="form-select d-none" id="editPackageExecutorSelect"
+                    name="executor_id">
+              <option value="">— не назначен —</option>
+              {% for executor in executors %}
+              <option value="{{ executor.id }}"
+                      data-department-id="{{ executor.department_id }}">
+                {{ executor.full_name }}
+              </option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          {# Удаление — как у шифра: слева, отдельно от «Сохранить», та же
+             форма с другим адресом, подтверждение штатным confirm().
+             Можно ли удалять (план и факт пакета), решает сервер. #}
+          <button type="submit" class="btn btn-outline-danger me-auto"
+                  id="editPackageDelete" formnovalidate>Удалить</button>
           <button type="button" class="btn btn-secondary"
                   data-bs-dismiss="modal">Отмена</button>
           <button type="submit" class="btn btn-primary">Сохранить</button>
@@ -327,8 +466,8 @@
 // Подготовка модалки заведения шифра.
 //
 // Модалка одна на страницу, поэтому перед показом её нужно настроить под
-// конкретную нажатую кнопку: подставить строку состава и отфильтровать
-// список исполнителей по бюро этой марки.
+// конкретную нажатую кнопку: подставить строку состава и очистить поля
+// от прошлого открытия.
 document.addEventListener('DOMContentLoaded', function () {
     const modal = document.getElementById('createSetModal');
     // Права set:manage нет — модалка не отрисована, настраивать нечего.
@@ -337,44 +476,27 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     const compositionInput = document.getElementById('setCompositionId');
-    const executorSelect = document.getElementById('setExecutor');
     const isTaskCheckbox = document.getElementById('setIsTask');
     const recipientWrap = document.getElementById('setRecipientWrap');
     const recipientSelect = document.getElementById('setRecipient');
     const markaFullInput = document.getElementById('setMarkaFull');
 
     // Bootstrap отдаёт нажавшую кнопку в event.relatedTarget — оттуда
-    // берём и строку состава, и отдел для фильтра исполнителей.
+    // берём строку состава.
     modal.addEventListener('show.bs.modal', function (event) {
         const trigger = event.relatedTarget;
         if (!trigger) {
             return;
         }
 
-        const compositionId = trigger.dataset.compositionId;
-        const departmentId = trigger.dataset.departmentId;
-
-        compositionInput.value = compositionId;
+        compositionInput.value = trigger.dataset.compositionId;
 
         // Форма переиспользуется: чистим значения от прошлого открытия,
-        // иначе пользователь увидит чужой шифр и чужого исполнителя.
+        // иначе пользователь увидит чужой шифр.
         markaFullInput.value = '';
         isTaskCheckbox.checked = false;
         recipientWrap.classList.add('d-none');
         recipientSelect.value = '';
-
-        // Исполнитель обязан числиться в бюро этой марки — сервер это
-        // проверяет. Прячем неподходящих, чтобы выбор был невозможен, а
-        // не отвергался после отправки.
-        Array.from(executorSelect.options).forEach(function (option) {
-            // Пустой option («не назначен») атрибута не имеет и виден всегда.
-            if (!option.dataset.departmentId) {
-                option.hidden = false;
-                return;
-            }
-            option.hidden = option.dataset.departmentId !== departmentId;
-        });
-        executorSelect.value = '';
     });
 
     // Галочка «это задание» открывает поле адресата. При снятии значение
@@ -451,7 +573,7 @@ document.addEventListener('DOMContentLoaded', function () {
 <script>
 // Заполнение карточки шифра.
 //
-// Данные берутся из data-атрибутов строки: полей четыре, и отдельная
+// Данные берутся из data-атрибутов строки: полей несколько, и отдельная
 // ручка за ними была бы избыточна. Если полей станет заметно больше —
 // перейти на запрос по set_id.
 document.addEventListener('DOMContentLoaded', function () {
@@ -463,11 +585,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const form = document.getElementById('editSetForm');
     const markaText = document.getElementById('editSetMarka');
     const markaFull = document.getElementById('editMarkaFull');
-    const executorView = document.getElementById('editExecutorView');
-    const executorName = document.getElementById('editExecutorName');
-    const executorChange = document.getElementById('editExecutorChange');
-    const executorSelect = document.getElementById('editExecutorSelect');
-    const statusSelect = document.getElementById('editStatus');
+    const releasedOn = document.getElementById('editReleasedOn');
+    const readiness = document.getElementById('editReadiness');
     const isTask = document.getElementById('editIsTask');
     const recipientWrap = document.getElementById('editRecipientWrap');
     const recipientSelect = document.getElementById('editRecipient');
@@ -490,9 +609,140 @@ document.addEventListener('DOMContentLoaded', function () {
         // подтверждения: пользователь должен видеть, ЧТО удаляет.
         deleteButton.formAction = form.action + '/delete';
         deleteButton.dataset.markaFull = data.markaFull;
+
         markaText.textContent = data.markaLabel;
         markaFull.value = data.markaFull;
+
+        // Дата приходит в ISO (ГГГГ-ММ-ДД) — ровно тот формат, который
+        // принимает <input type="date">. Пустая строка — не выпущен.
+        releasedOn.value = data.releasedOn || '';
+        // Готовность — подсказка к решению о выпуске: начальник видит,
+        // сколько пакетов завершено, прежде чем поставить дату.
+        readiness.textContent = data.readiness;
+
+        // Тип шифра: адресат заполнен — значит задание.
+        const hasRecipient = Boolean(data.recipientId);
+        isTask.checked = hasRecipient;
+        recipientSelect.value = data.recipientId || '';
+        recipientWrap.classList.toggle('d-none', !hasRecipient);
+    });
+
+    // Подтверждение удаления. Штатный confirm(), а не вторая модалка
+    // поверх первой: Bootstrap вложенные модалки поддерживает плохо.
+    deleteButton.addEventListener('click', function (event) {
+        const question = 'Удалить шифр ' + deleteButton.dataset.markaFull
+            + '?\nДействие необратимо.';
+        if (!window.confirm(question)) {
+            event.preventDefault();
+        }
+    });
+
+    isTask.addEventListener('change', function () {
+        if (isTask.checked) {
+            recipientWrap.classList.remove('d-none');
+        } else {
+            recipientWrap.classList.add('d-none');
+            // Значение сбрасывается: иначе адресат от передумавшего
+            // пользователя ушёл бы на сервер, и комплект остался бы
+            // заданием вопреки снятой галочке.
+            recipientSelect.value = '';
+        }
+    });
+});
+</script>
+<script>
+// Модалки пакета работ: заведение и карточка.
+//
+// Один блок на обе: им нужен общий помощник — фильтр списка
+// исполнителей по бюро марки.
+document.addEventListener('DOMContentLoaded', function () {
+    const createModal = document.getElementById('createPackageModal');
+    const editModal = document.getElementById('editPackageModal');
+    // Права set:manage нет — модалки не отрисованы, настраивать нечего.
+    if (!createModal || !editModal) {
+        return;
+    }
+
+    // Адреса собираются из id: одна форма на все шифры и пакеты.
+    const setsUrl = '{{ "/planner/works/" ~ project.id ~ "/sets/" }}';
+    const packagesUrl = '{{ "/planner/works/" ~ project.id ~ "/packages/" }}';
+
+    // Исполнитель обязан числиться в бюро марки — сервер это проверяет.
+    // Прячем неподходящих, чтобы выбор был невозможен, а не отвергался
+    // после отправки. Пустой option («не назначен») атрибута не имеет и
+    // виден всегда.
+    function filterExecutors(select, departmentId) {
+        Array.from(select.options).forEach(function (option) {
+            if (!option.dataset.departmentId) {
+                option.hidden = false;
+                return;
+            }
+            option.hidden = option.dataset.departmentId !== departmentId;
+        });
+    }
+
+    // --- Заведение пакета -------------------------------------------
+    const createForm = document.getElementById('createPackageForm');
+    const createSet = document.getElementById('createPackageSet');
+    const createName = document.getElementById('createPackageName');
+    const createDescription = document.getElementById('createPackageDescription');
+    const createExecutor = document.getElementById('createPackageExecutor');
+
+    createModal.addEventListener('show.bs.modal', function (event) {
+        const trigger = event.relatedTarget;
+        if (!trigger) {
+            return;
+        }
+        const data = trigger.dataset;
+
+        createForm.action = setsUrl + data.setId + '/packages';
+        createSet.textContent = 'Шифр ' + data.setLabel;
+
+        // Форма переиспользуется: чистим значения от прошлого открытия.
+        createName.value = '';
+        createDescription.value = '';
+        filterExecutors(createExecutor, data.departmentId);
+        createExecutor.value = '';
+    });
+
+    // --- Карточка пакета --------------------------------------------
+    const editForm = document.getElementById('editPackageForm');
+    const editSet = document.getElementById('editPackageSet');
+    const editName = document.getElementById('editPackageName');
+    const editDescription = document.getElementById('editPackageDescription');
+    const statusSelect = document.getElementById('editPackageStatus');
+    const statusNote = document.getElementById('editPackageStatusNote');
+    const executorView = document.getElementById('editPackageExecutorView');
+    const executorName = document.getElementById('editPackageExecutorName');
+    const executorChange = document.getElementById('editPackageExecutorChange');
+    const executorSelect = document.getElementById('editPackageExecutorSelect');
+    const deleteButton = document.getElementById('editPackageDelete');
+
+    // Примечание выбранного статуса — под списком.
+    function showStatusNote() {
+        const option = statusSelect.options[statusSelect.selectedIndex];
+        statusNote.textContent = option ? option.dataset.note : '';
+    }
+
+    editModal.addEventListener('show.bs.modal', function (event) {
+        const row = event.relatedTarget;
+        if (!row) {
+            return;
+        }
+        const data = row.dataset;
+
+        editForm.action = packagesUrl + data.packageId;
+
+        // Удаление — та же форма, свой адрес. Название и шифр — для
+        // текста подтверждения: пользователь должен видеть, ЧТО удаляет.
+        deleteButton.formAction = editForm.action + '/delete';
+        deleteButton.dataset.label = '«' + data.name + '» шифра ' + data.setLabel;
+
+        editSet.textContent = 'Шифр ' + data.setLabel;
+        editName.value = data.name;
+        editDescription.value = data.description;
         statusSelect.value = data.statusId;
+        showStatusNote();
 
         // Исполнитель показан текстом; поле формы скрыто и потому НЕ
         // отправляется. Сервер трактует отсутствие поля как «не менять».
@@ -505,30 +755,12 @@ document.addEventListener('DOMContentLoaded', function () {
 
         // В списке только сотрудники бюро этой марки. Уволенного
         // исполнителя среди них нет — назначить его заново нельзя.
-        Array.from(executorSelect.options).forEach(function (option) {
-            if (!option.dataset.departmentId) {
-                option.hidden = false;
-                return;
-            }
-            option.hidden = option.dataset.departmentId !== data.departmentId;
-        });
+        filterExecutors(executorSelect, data.departmentId);
         executorSelect.value = data.executorId || '';
-
-        // Тип шифра: адресат заполнен — значит задание.
-        const hasRecipient = Boolean(data.recipientId);
-        isTask.checked = hasRecipient;
-        recipientSelect.value = data.recipientId || '';
-        recipientWrap.classList.toggle('d-none', !hasRecipient);
     });
-    // Подтверждение удаления. Штатный confirm(), а не вторая модалка
-    // поверх первой: Bootstrap вложенные модалки поддерживает плохо.
-    deleteButton.addEventListener('click', function (event) {
-        const question = 'Удалить шифр ' + deleteButton.dataset.markaFull
-            + '?\nДействие необратимо.';
-        if (!window.confirm(question)) {
-            event.preventDefault();
-        }
-    });    
+
+    statusSelect.addEventListener('change', showStatusNote);
+
     // «Сменить» заменяет текст полем выбора. Обратной кнопки нет: раз
     // начальник нажал, он собирается менять, а отказаться можно кнопкой
     // «Отмена» внизу карточки.
@@ -538,15 +770,12 @@ document.addEventListener('DOMContentLoaded', function () {
         executorSelect.disabled = false;
     });
 
-    isTask.addEventListener('change', function () {
-        if (isTask.checked) {
-            recipientWrap.classList.remove('d-none');
-        } else {
-            recipientWrap.classList.add('d-none');
-            // Значение сбрасывается: иначе адресат от передумавшего
-            // пользователя ушёл бы на сервер, и комплект остался бы
-            // заданием вопреки снятой галочке.
-            recipientSelect.value = '';
+    // Подтверждение удаления — штатный confirm(), как у шифра.
+    deleteButton.addEventListener('click', function (event) {
+        const question = 'Удалить пакет ' + deleteButton.dataset.label
+            + '?\nДействие необратимо.';
+        if (!window.confirm(question)) {
+            event.preventDefault();
         }
     });
 });
