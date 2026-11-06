@@ -1,13 +1,13 @@
 // app/frontend/src/components/WorkloadGrid.jsx
-// Сетка загрузки бюро: инженеры, их шифры и календарные дни.
+// Сетка загрузки бюро: инженеры, их пакеты работ и календарные дни.
 //
 // Данные приходят плоскими слоями (employees / rows / days / cells) и
 // собираются здесь в индексы: во вложенном дереве дни инженера пришлось
-// бы дублировать в каждой строке шифра.
+// бы дублировать в каждой строке пакета.
 //
 // Два правила редактирования, и они несимметричны:
-//   - ПОСТАВИТЬ день может только текущий исполнитель шифра, и только
-//     если эта дата у шифра ещё никем не занята;
+//   - ПОСТАВИТЬ день может только текущий исполнитель пакета, и только
+//     если эта дата у пакета ещё никем не занята;
 //   - СНЯТЬ день может кто угодно, в том числе прежний исполнитель.
 // Асимметрия не произвольная: добавление занимает ресурс, удаление
 // освобождает. Без второго правила план, оставшийся за прежним
@@ -119,16 +119,16 @@ const monthLabel = (iso) => MONTHS[Number(iso.slice(5, 7)) - 1];
 // День инженера — для вердикта и сводной строки.
 const dayKey = (employeeId, iso) => `${employeeId}|${iso}`;
 
-// Дата ШИФРА — опора правила «дата шифра планируется один раз».
-// Инженера здесь нет намеренно: занятость принадлежит шифру.
-const planKey = (markSetId, iso) => `${markSetId}|${iso}`;
+// Дата ПАКЕТА — опора правила «дата пакета планируется один раз».
+// Инженера здесь нет намеренно: занятость принадлежит пакету.
+const planKey = (packageId, iso) => `${packageId}|${iso}`;
 
 // Несохранённое изменение. Инженер В КЛЮЧЕ ОБЯЗАТЕЛЕН: снять день у
 // одного и отдать его другому — две разные операции на одну пару
-// «шифр + дата». Без инженера они схлопывались бы в одну, и второй
+// «пакет + дата». Без инженера они схлопывались бы в одну, и второй
 // клик отменял бы первый вместо того, чтобы добавиться к нему.
-const cellId = (markSetId, employeeId, iso) =>
-  `${markSetId}|${employeeId}|${iso}`;
+const cellId = (packageId, employeeId, iso) =>
+  `${packageId}|${employeeId}|${iso}`;
 
 // --- индексация ------------------------------------------------------
 
@@ -138,20 +138,20 @@ function buildIndex(grid) {
     dayByKey.set(dayKey(day.employee_id, day.work_date), day);
   }
 
-  // Кто занимает дату ШИФРА: ключ «шифр|дата» → id инженера. Владелец
+  // Кто занимает дату ПАКЕТА: ключ «пакет|дата» → id инженера. Владелец
   // может быть любым, включая прежнего исполнителя.
   const ownerBySetDay = new Map();
   const factByKey = new Map();
   for (const cell of grid.cells) {
     if (cell.has_plan) {
       ownerBySetDay.set(
-        planKey(cell.mark_set_id, cell.work_date),
+        planKey(cell.package_id, cell.work_date),
         cell.employee_id
       );
     }
     if (cell.has_fact) {
       factByKey.set(
-        `${cell.employee_id}|${cell.mark_set_id}|${cell.work_date}`,
+        `${cell.employee_id}|${cell.package_id}|${cell.work_date}`,
         true
       );
     }
@@ -168,7 +168,7 @@ function buildIndex(grid) {
 }
 
 /**
- * Накладывает несохранённые изменения на занятость дат шифров.
+ * Накладывает несохранённые изменения на занятость дат пакетов.
  *
  * Нужна, потому что доступность меняется по ходу правки: снял день у
  * Иванова — он в тот же миг доступен Комарову, ещё до сохранения.
@@ -184,16 +184,16 @@ function applyPending(ownerBySetDay, pending) {
     if (operation !== 'remove') {
       continue;
     }
-    const [markSetId, , iso] = key.split('|');
-    result.delete(planKey(Number(markSetId), iso));
+    const [packageId, , iso] = key.split('|');
+    result.delete(planKey(Number(packageId), iso));
   }
 
   for (const [key, operation] of pending) {
     if (operation !== 'add') {
       continue;
     }
-    const [markSetId, employeeId, iso] = key.split('|');
-    result.set(planKey(Number(markSetId), iso), Number(employeeId));
+    const [packageId, employeeId, iso] = key.split('|');
+    result.set(planKey(Number(packageId), iso), Number(employeeId));
   }
 
   return result;
@@ -214,14 +214,14 @@ function dayColumnClasses(base, iso, todayIso) {
 // --- ячейки ----------------------------------------------------------
 
 /**
- * Ячейка на пересечении строки шифра и дня.
+ * Ячейка на пересечении строки пакета и дня.
  *
  * В ячейке ВСЕГДА две строки: верхняя под план, нижняя под факт. Пустая
  * строка остаётся прозрачной, но место занимает — иначе одиночная
  * полоса вставала бы по центру, и «запланировано, но не отработано»
  * выглядело бы неотличимо от «отработано без плана».
  */
-function MarkSetCell({
+function PackageCell({
   hasPlan,
   hasFact,
   pending,
@@ -276,16 +276,16 @@ function MarkSetCell({
  * Ячейка сводной строки инженера: план и факт дня по ДВУМ каналам.
  *
  *   plan    — контур: null — плана нет; 'saved' — план записан (по
- *             любому шифру); 'pending' — новый или перенесённый, не
+ *             любому пакету); 'pending' — новый или перенесённый, не
  *             сохранён (пунктир); 'removing' — снимается, ещё записан
  *             (гаснущий контур);
  *   fact    — заливка: null — факта нет, 'onplan' — факт по плановому
- *             шифру, 'offplan' — факт без плана или по другому шифру.
+ *             пакету, 'offplan' — факт без плана или по другому пакету.
  *
  * Каналы независимы, поэтому видны все четыре случая: только контур
  * (план без факта — «пустой» день), контур с зелёной заливкой, контур
  * с песочной (план был, работал над другим), песочная без контура
- * (плана не было). Цвета заливки — те же классы, что в строках шифров.
+ * (плана не было). Цвета заливки — те же классы, что в строках пакетов.
  *
  * Буква табеля приходит даже когда отсутствие не блокирует
  * планирование (командировка): день планируемый, но отличать его от
@@ -331,7 +331,7 @@ function EmployeeCell({ day, plan, fact, columnClasses }) {
  * Статусы, встречающиеся в строках окна, — для легенды.
  *
  * Берём из ответа сервера, а не из списка в коде: названия живут в
- * справочнике set_statuses, и дублировать их здесь незачем.
+ * справочнике package_statuses, и дублировать их здесь незачем.
  * Возвращает пары [id, название] по возрастанию id.
  */
 function statusLegendOf(rows) {
@@ -358,7 +358,7 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
   const [error, setError] = useState(null);
   // Свёрнутые инженеры: новый человек в ответе появится раскрытым.
   const [collapsed, setCollapsed] = useState(() => new Set());
-  // Несохранённые изменения: ключ «шифр|инженер|дата» → 'add'|'remove'.
+  // Несохранённые изменения: ключ «пакет|инженер|дата» → 'add'|'remove'.
   const [pending, setPending] = useState(() => new Map());
   // Отказы последнего сохранения: тексты для показа и ключи для
   // подсветки конкретных ячеек.
@@ -427,7 +427,7 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
       } else {
         // Липкие колонки закрывают левый край ленты, поэтому к отступу
         // добавляется их ширина: иначе текущая дата оказалась бы под
-        // колонкой «Шифр».
+        // колонкой «Пакет».
         const sticky = container.querySelector('.workload-grid__days');
         const stickyRight = sticky
           ? sticky.offsetLeft + sticky.offsetWidth
@@ -456,13 +456,13 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
   }, [index, pending]);
 
   // Занятость дня самого инженера — для сводной строки и для проверки
-  // «человек уже занят другим шифром». Пересобирается из занятости дат
-  // шифров, поэтому несохранённые изменения учтены здесь тоже.
+  // «человек уже занят другим пакетом». Пересобирается из занятости дат
+  // пакетов, поэтому несохранённые изменения учтены здесь тоже.
   const busyDays = useMemo(() => {
     const result = new Map();
     for (const [key, employeeId] of effectiveOwner) {
-      const [markSetId, iso] = key.split('|');
-      result.set(dayKey(employeeId, iso), Number(markSetId));
+      const [packageId, iso] = key.split('|');
+      result.set(dayKey(employeeId, iso), Number(packageId));
     }
     return result;
   }, [effectiveOwner]);
@@ -474,8 +474,8 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
   const savedBusyDays = useMemo(() => {
     const result = new Map();
     for (const [key, employeeId] of index?.ownerBySetDay || []) {
-      const [markSetId, iso] = key.split('|');
-      result.set(dayKey(employeeId, iso), Number(markSetId));
+      const [packageId, iso] = key.split('|');
+      result.set(dayKey(employeeId, iso), Number(packageId));
     }
     return result;
   }, [index]);  
@@ -488,13 +488,13 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
     return result;
   }, [grid]);
 
-  // Отказ приходит без инженера — только шифр и дата. Подсвечиваем обе
-  // строки такого шифра: какая из них виновата, сервер не сообщает, а
+  // Отказ приходит без инженера — только пакет и дата. Подсвечиваем обе
+  // строки такого пакета: какая из них виновата, сервер не сообщает, а
   // догадываться на клиенте не за чем.
   const rejectedKeys = useMemo(
     () =>
       new Set(
-        rejections.map((item) => planKey(item.mark_set_id, item.work_date))
+        rejections.map((item) => planKey(item.package_id, item.work_date))
       ),
     [rejections]
   );
@@ -524,15 +524,15 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
   };
 
   /**
-   * Клик по ячейке шифра: ставит день в план или снимает его.
+   * Клик по ячейке пакета: ставит день в план или снимает его.
    *
    * Повторный клик по несохранённому изменению отменяет само изменение,
    * а не добавляет обратное: нажал по ошибке — нажал ещё раз, и в пачке
    * не останется следа. Ключ включает инженера, поэтому снятие у одного
    * и постановка другому на ту же дату друг друга не гасят.
    */
-  const toggleCell = (markSetId, employeeId, iso, occupied) => {
-    const key = cellId(markSetId, employeeId, iso);
+  const toggleCell = (packageId, employeeId, iso, occupied) => {
+    const key = cellId(packageId, employeeId, iso);
     setPending((previous) => {
       const next = new Map(previous);
       if (next.has(key)) {
@@ -555,12 +555,12 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
     const operations = [];
     for (const [key, operation] of pending) {
       // Инженер в операцию не уходит: для add сервер берёт его из
-      // id_executor шифра, для remove — из владельца ячейки. В ключе
+      // исполнителя пакета, для remove — из владельца ячейки. В ключе
       // он нужен только клиенту, чтобы различать строки.
-      const [markSetId, , iso] = key.split('|');
+      const [packageId, , iso] = key.split('|');
       operations.push({
         op: operation,
-        mark_set_id: Number(markSetId),
+        package_id: Number(packageId),
         work_date: iso,
       });
     }
@@ -675,7 +675,7 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
           <div className="fw-semibold">Изменения не применены</div>
           <ul className="mb-0 small">
             {rejections.map((item) => (
-              <li key={planKey(item.mark_set_id, item.work_date)}>
+              <li key={planKey(item.package_id, item.work_date)}>
                 {item.message}
               </li>
             ))}
@@ -690,7 +690,7 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
         <table className="table table-sm workload-grid mb-0">
           <thead>
             <tr>
-              <th className="workload-grid__name">Шифр</th>
+              <th className="workload-grid__name">Пакет</th>
               <th className="workload-grid__days">дн.</th>
               {dates.map((iso) => {
                 const { weekday, day } = formatDay(iso);
@@ -758,26 +758,26 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
 
                       // План — сравнение эффективной занятости (с кликами)
                       // с сохранённой: совпали — записан; появился или
-                      // сменил шифр — не сохранён; пропал — снимается.
+                      // сменил пакет — не сохранён; пропал — снимается.
                       // Факт «по плану» — только если он стоит на ТОМ ЖЕ
-                      // шифре, что и план: та же оценка, что в ячейке
-                      // шифра (MarkSetCell). Дни с фактом заблокированы
+                      // пакете, что и план: та же оценка, что в ячейке
+                      // пакета (PackageCell). Дни с фактом заблокированы
                       // для правки плана, поэтому там saved === effective.
-                      const planSetId = busyDays.get(key);
-                      const savedSetId = savedBusyDays.get(key);
+                      const planPackageId = busyDays.get(key);
+                      const savedPackageId = savedBusyDays.get(key);
                       let plan = null;
-                      if (planSetId !== undefined) {
-                        plan = planSetId === savedSetId ? 'saved' : 'pending';
-                      } else if (savedSetId !== undefined) {
+                      if (planPackageId !== undefined) {
+                        plan = planPackageId === savedPackageId ? 'saved' : 'pending';
+                      } else if (savedPackageId !== undefined) {
                         plan = 'removing';
                       }
                       const hasFact = day?.state === 'has_fact';
                       let fact = null;
                       if (hasFact) {
                         const onPlan =
-                          planSetId !== undefined &&
+                          planPackageId !== undefined &&
                           index.factByKey.has(
-                            `${employee.id}|${planSetId}|${iso}`
+                            `${employee.id}|${planPackageId}|${iso}`
                           );
                         fact = onPlan ? 'onplan' : 'offplan';
                       }
@@ -800,16 +800,19 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
 
                   {!isCollapsed &&
                     rows.map((row) => (
-                      <tr key={`${row.employee_id}-${row.mark_set_id}`}>
+                      <tr key={`${row.employee_id}-${row.package_id}`}>
                         <td className="workload-grid__name workload-grid__name--set">
-                          <code className="workload-marka">
-                            {row.marka_full}
+                          {/* Подпись «шифр (пакет)» длиннее прежнего шифра и
+                              в колонку целиком не входит — обрезается как
+                              раз название пакета. Полная — по наведению. */}
+                          <code className="workload-marka" title={row.label}>
+                            {row.label}
                           </code>
                           
                           {!row.is_executor && (
                             <span
                               className="badge text-bg-secondary ms-2"
-                              title="Инженер не исполнитель этого шифра: план можно только снять"
+                              title="Инженер не исполнитель этого пакета: план можно только снять"
                             >
                               не исполнитель
                             </span>
@@ -817,12 +820,12 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
                         </td>
                                                 <td className="workload-grid__days">
                           {/* Слева кружок статуса, справа дни. Кружок не
-                              занимает ширины колонки «Шифр»: длинный шифр
+                              занимает ширины колонки «Пакет»: длинная подпись
                               не вытесняет статус. Название — по наведению. */}
                           <div className="d-flex align-items-center justify-content-between">
                             {row.status_name ? (
                               <span
-                                className={`set-status-dot set-status--${row.status_id}`}
+                                className={`package-status-dot package-status package-status--${row.status_id}`}
                                 title={`Статус: ${row.status_name}`}
                                 role="img"
                                 aria-label={`Статус: ${row.status_name}`}
@@ -834,17 +837,17 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
                           </div>
                         </td>
                         {dates.map((iso) => {
-                          const setKey = planKey(row.mark_set_id, iso);
+                          const packageKey = planKey(row.package_id, iso);
                           const day = index.dayByKey.get(
                             dayKey(employee.id, iso)
                           );
-                          const owner = effectiveOwner.get(setKey);
+                          const owner = effectiveOwner.get(packageKey);
                           const hasPlan = owner === employee.id;
                           // Ключ с инженером — изменение принадлежит
                           // конкретной строке, и соседняя строка того
-                          // же шифра его не подхватит.
+                          // же пакета его не подхватит.
                           const pendingOp = pending.get(
-                            cellId(row.mark_set_id, employee.id, iso)
+                            cellId(row.package_id, employee.id, iso)
                           );
 
                           // Снять можно всегда: операция ничего не
@@ -858,18 +861,18 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
                           if (!hasPlan) {
                             // Поставить может только текущий
                             // исполнитель: сервер берёт человека из
-                            // шифра, и клик по чужой строке завёл бы
+                            // пакета, и клик по чужой строке завёл бы
                             // план не тому.
                           if (!row.allows_plan) {
-                              // Шифр на проверке или выпущен: сервер
-                              // откажет (SET_CLOSED). Снятие плана эта
+                              // Пакет не «В работе»: сервер
+                              // откажет (PACKAGE_CLOSED). Снятие плана эта
                               // ветка не трогает — она только для
                               // пустых клеток.
-                              title = `Шифр в статусе «${row.status_name}»: план можно только снять`;
+                              title = `Пакет в статусе «${row.status_name}»: план можно только снять`;
                             } else if (!row.is_executor) {
                               title = 'Планировать может только исполнитель';
                             } else if (owner !== undefined) {
-                              // Дата шифра уже занята — возможно, за
+                              // Дата пакета уже занята — возможно, за
                               // другим человеком. Две записи об одном
                               // дне работы означали бы двойной счёт
                               // трудозатрат.
@@ -879,22 +882,22 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
                             } else if (BLOCKED_STATES.has(day?.state)) {
                               title = undefined;
                             } else if (busyDays.has(dayKey(employee.id, iso))) {
-                              title = 'Инженер занят другим шифром';
+                              title = 'Инженер занят другим пакетом';
                             } else {
                               clickable = canEdit && !saving;
                             }
                           }
 
                           return (
-                            <MarkSetCell
+                            <PackageCell
                               key={iso}
                               hasPlan={hasPlan}
                               hasFact={index.factByKey.has(
-                                `${employee.id}|${row.mark_set_id}|${iso}`
+                                `${employee.id}|${row.package_id}|${iso}`
                               )}
                               pending={pendingOp}
                               dayState={day?.state}
-                              rejected={rejectedKeys.has(setKey)}
+                              rejected={rejectedKeys.has(packageKey)}
                               clickable={clickable}
                               title={title}
                               columnClasses={dayColumnClasses(
@@ -904,7 +907,7 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
                               )}
                               onClick={() =>
                                 toggleCell(
-                                  row.mark_set_id,
+                                  row.package_id,
                                   employee.id,
                                   iso,
                                   hasPlan
@@ -947,10 +950,10 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
         <span className="ms-3">
           верхняя строка пары — план, нижняя — факт
         </span>
-        {/* Статусы шифров — только те, что есть в окне. */}
+        {/* Статусы пакетов — только те, что есть в окне. */}
         {statusLegendOf(grid.rows).map(([statusId, statusName]) => (
           <span key={statusId} className="ms-3 d-inline-flex align-items-center gap-1">
-            <span className={`set-status-dot set-status--${statusId}`} />
+            <span className={`package-status-dot package-status package-status--${statusId}`} />
             {statusName}
           </span>
         ))}
@@ -963,7 +966,7 @@ export default function WorkloadGrid({ departmentId, today, canEdit }) {
         <span className="workload-bar workload-bar--planned workload-bar--fact ms-3" />{' '}
         факт по плану
         <span className="workload-bar workload-bar--planned workload-bar--offplan ms-3" />{' '}
-        план есть, факт по другому шифру
+        план есть, факт по другому пакету
         <span className="workload-bar workload-bar--offplan ms-3" /> факт без плана
       </div>
     </div>

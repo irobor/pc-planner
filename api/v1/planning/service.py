@@ -11,15 +11,18 @@
 несколько шифров вырождается в сотни обращений: именно этим страдала
 PL/pgSQL-функция fill_plan_cells, которую мы заменяем.
 
-Запись изменений (apply_changes, rebuild_plan) появится следующим
-шагом — поверх этого же контекста.
+Запись изменений (apply_changes) работает поверх этого же контекста.
+
+План ставится на пакет работ, а не на комплект: строка сетки — пара
+«инженер + пакет». Шапки плана нет: план — это только ячейки, а его
+границы и объём вычисляются запросом (_load_plan_spans).
 """
 import logging
 from datetime import date, timedelta
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import delete, func, insert, or_, select, update
+from sqlalchemy import ColumnElement, delete, func, insert, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,13 +32,14 @@ from app.api.v1.planning.rules import (
     DayInfo,
     EmployeeRow,
     FactCellInfo,
-    MarkSetRow,
+    PackageRow,
     PlanCellInfo,
-    WorkPlanInfo,
+    PlanSpanInfo,
     day_verdict,
     DayState,
     PLAN_STATUS_IDS,
-    set_allows_plan,
+    package_allows_plan,
+    package_label,
 )
 from app.api.v1.planning.schemas import (
     CellOut,
@@ -47,7 +51,12 @@ from app.api.v1.planning.schemas import (
     CellOperation,
 )
 from app.core.scope import Scope
-from app.models.composition import ProjectComposition, ProjectMarkSet, SetStatus
+from app.models.composition import (
+    PackageStatus,
+    ProjectComposition,
+    ProjectMarkSet,
+    WorkPackage,
+)
 from app.models.employee import Employee, EmployeeAssignment
 from app.models.planning import (
     AbsencePeriod,
@@ -56,17 +65,16 @@ from app.models.planning import (
     FactCalendarCell,
     PlanCalendarCell,
     ProductionCalendar,
-    WorkPlan,
 )
 
 logger = logging.getLogger(__name__)
 
 
-# Статусы комплектов, попадающие в сетку как строки «я исполнитель».
+# Статусы пакетов, попадающие в сетку как строки «я исполнитель».
 # Совпадают со статусами, в которые можно добавлять план
-# (rules.PLAN_STATUS_IDS): шифр, который нельзя планировать, незачем
+# (rules.PLAN_STATUS_IDS): пакет, который нельзя планировать, незачем
 # подтягивать в сетку как рабочий. Одна константа — два правила не
-# разойдутся. Шифры других статусов всё равно видны, если в окне у них
+# разойдутся. Пакеты других статусов всё равно видны, если в окне у них
 # есть план или факт: это история занятости инженера.
 GRID_STATUS_IDS: tuple[int, ...] = PLAN_STATUS_IDS
 
@@ -301,27 +309,24 @@ async def _load_plan_cells(
 ) -> dict[tuple[int, date], PlanCellInfo]:
     """Плановые ячейки инженеров на интервал.
 
-    ВАЖНО: отбор идёт по инженерам, а НЕ по бюро. Шифр, занявший день,
+    ВАЖНО: отбор идёт по инженерам, а НЕ по бюро. Пакет, занявший день,
     может принадлежать чужому подразделению — инженера туда занимали.
     Ограничь мы выборку своим бюро, чужая занятость стала бы невидимой,
     и сетка предлагала бы планировать на день, который база не примет.
 
-    Шифр-конкурент показываем целиком (решение пользователя): начальнику
-    понятнее, с кем договариваться.
+    Пакет-конкурент показываем целиком, с шифром (решение пользователя):
+    начальнику понятнее, с кем договариваться.
     """
     stmt = (
         select(
             PlanCalendarCell.employee_id,
             PlanCalendarCell.work_date,
-            PlanCalendarCell.work_plan_id,
-            WorkPlan.mark_set_id,
+            PlanCalendarCell.package_id,
             ProjectMarkSet.marka_full,
+            WorkPackage.name,
         )
-        .join(WorkPlan, WorkPlan.id == PlanCalendarCell.work_plan_id)
-        .join(
-            ProjectMarkSet,
-            ProjectMarkSet.id == WorkPlan.mark_set_id,
-        )
+        .join(WorkPackage, WorkPackage.id == PlanCalendarCell.package_id)
+        .join(ProjectMarkSet, ProjectMarkSet.id == WorkPackage.mark_set_id)
         .where(
             PlanCalendarCell.employee_id.in_(employee_ids),
             PlanCalendarCell.work_date >= date_from,
@@ -331,11 +336,10 @@ async def _load_plan_cells(
     rows = (await db.execute(stmt)).all()
     return {
         (emp_id, work_date): PlanCellInfo(
-            work_plan_id=plan_id,
-            mark_set_id=mark_set_id,
-            marka_full=marka_full,
+            package_id=package_id,
+            label=package_label(marka_full, package_name),
         )
-        for emp_id, work_date, plan_id, mark_set_id, marka_full in rows
+        for emp_id, work_date, package_id, marka_full, package_name in rows
     }
 
 
@@ -347,8 +351,8 @@ async def _load_fact_cells(
 ) -> dict[tuple[int, date], FactCellInfo]:
     """Фактические ячейки инженеров на интервал.
 
-    На план не ссылаются: факт возможен там, где плана не было вовсе.
-    Именно поэтому join идёт сразу на шифр, а не через work_plan.
+    Факт ссылается на пакет так же, как план, но от плана не зависит:
+    факт возможен там, где плана не было вовсе.
 
     Отбор по инженерам — по той же причине, что и у плановых ячеек.
     """
@@ -356,13 +360,12 @@ async def _load_fact_cells(
         select(
             FactCalendarCell.employee_id,
             FactCalendarCell.work_date,
-            FactCalendarCell.mark_set_id,
+            FactCalendarCell.package_id,
             ProjectMarkSet.marka_full,
+            WorkPackage.name,
         )
-        .join(
-            ProjectMarkSet,
-            ProjectMarkSet.id == FactCalendarCell.mark_set_id,
-        )
+        .join(WorkPackage, WorkPackage.id == FactCalendarCell.package_id)
+        .join(ProjectMarkSet, ProjectMarkSet.id == WorkPackage.mark_set_id)
         .where(
             FactCalendarCell.employee_id.in_(employee_ids),
             FactCalendarCell.work_date >= date_from,
@@ -372,92 +375,135 @@ async def _load_fact_cells(
     rows = (await db.execute(stmt)).all()
     return {
         (emp_id, work_date): FactCellInfo(
-            mark_set_id=mark_set_id,
-            marka_full=marka_full,
+            package_id=package_id,
+            label=package_label(marka_full, package_name),
         )
-        for emp_id, work_date, mark_set_id, marka_full in rows
+        for emp_id, work_date, package_id, marka_full, package_name in rows
     }
 
 
-async def _load_mark_sets(
+# Пакет и то, что о нём нужно контексту: шифр (для подписи), строка
+# состава и её отдел (для проверки области).
+PackageFetched = tuple[WorkPackage, str, int, int]
+
+
+async def _fetch_packages(
+    db: AsyncSession, *conditions: ColumnElement[bool]
+) -> list[PackageFetched]:
+    """Пакеты по условиям — вместе с шифром, строкой состава и отделом.
+
+    Один запрос вместо пакета, шифра и состава по отдельности: все три
+    загрузчика пакетов читают одни и те же поля. Отдел нужен только
+    проверке области в контуре записи, но строка состава всё равно
+    присоединяется — лишняя колонка дешевле второго варианта запроса.
+    """
+    stmt = (
+        select(
+            WorkPackage,
+            ProjectMarkSet.marka_full,
+            ProjectMarkSet.composition_id,
+            ProjectComposition.department_id,
+        )
+        .join(ProjectMarkSet, ProjectMarkSet.id == WorkPackage.mark_set_id)
+        .join(
+            ProjectComposition,
+            ProjectComposition.id == ProjectMarkSet.composition_id,
+        )
+        .where(*conditions)
+    )
+    return [
+        (package, marka_full, composition_id, department_id)
+        for package, marka_full, composition_id, department_id in (
+            await db.execute(stmt)
+        ).all()
+    ]
+
+
+def _package_row(
+    package: WorkPackage, marka_full: str, composition_id: int
+) -> PackageRow:
+    """Строка контекста из пакета и его шифра."""
+    return PackageRow(
+        id=package.id,
+        label=package_label(marka_full, package.name),
+        executor_id=package.executor_id,
+        composition_id=composition_id,
+        status_id=package.status_id,
+    )
+
+
+async def _load_packages(
     db: AsyncSession,
     employee_ids: list[int],
     plan_cells: dict[tuple[int, date], PlanCellInfo],
     fact_cells: dict[tuple[int, date], FactCellInfo],
     executor_status_ids: tuple[int, ...] = GRID_STATUS_IDS,
-) -> dict[int, MarkSetRow]:
-    """Шифры — строки сетки. Объединение трёх источников.
+) -> dict[int, PackageRow]:
+    """Пакеты — строки сетки. Объединение трёх источников.
 
-    1. Инженер назначен исполнителем (фильтр по статусу: выпущенные
-       комплекты в сетке не нужны, иначе за год накопятся десятки
-       закрытых строк).
-        Набор статусов задаётся executor_status_ids: планированию нужны
-       GRID_STATUS_IDS, факту — FACT_STATUS_IDS (шире, с «На проверке»).
-    2. На шифре есть плановые ячейки инженера — занятость чужим шифром,
-       в том числе из другого бюро или проекта.
-    3. На шифре есть фактические ячейки — «факт вне плана»: человек
-       подхватил чужую работу, исполнителем не числясь (заменил
-       заболевшего).
+    1. Инженер — исполнитель пакета (фильтр по статусу: завершённые и
+       приостановленные пакеты в сетке не нужны, иначе за год накопятся
+       десятки закрытых строк).
+       Набор статусов задаётся executor_status_ids: планированию нужны
+       GRID_STATUS_IDS, факту — свой набор.
+    2. На пакете есть плановые ячейки инженера — занятость чужим
+       пакетом, в том числе из другого бюро или проекта, и остаток плана
+       после смены исполнителя.
+    3. На пакете есть фактические ячейки — «факт вне плана»: человек
+       подхватил чужую работу, исполнителем не числясь.
 
     Источники 2 и 3 фильтру по статусу НЕ подчиняются: если день уже
     занят или отработан, скрывать его из-за статуса нельзя — сетка
     показывала бы свободный день, который база не примет.
     """
-    stmt = select(ProjectMarkSet).where(
-        ProjectMarkSet.id_executor.in_(employee_ids),
-        ProjectMarkSet.status_id.in_(executor_status_ids),
+    rows = await _fetch_packages(
+        db,
+        WorkPackage.executor_id.in_(employee_ids),
+        WorkPackage.status_id.in_(executor_status_ids),
     )
-    rows = list((await db.execute(stmt)).scalars().all())
 
-    # Шифры, засветившиеся в ячейках, но не попавшие по исполнителю.
-    referenced = {info.mark_set_id for info in plan_cells.values()}
-    referenced |= {info.mark_set_id for info in fact_cells.values()}
-    missing = referenced - {row.id for row in rows}
+    # Пакеты, засветившиеся в ячейках, но не попавшие по исполнителю.
+    referenced = {info.package_id for info in plan_cells.values()}
+    referenced |= {info.package_id for info in fact_cells.values()}
+    missing = referenced - {package.id for package, *_ in rows}
     if missing:
-        extra = select(ProjectMarkSet).where(ProjectMarkSet.id.in_(missing))
-        rows.extend((await db.execute(extra)).scalars().all())
+        rows.extend(await _fetch_packages(db, WorkPackage.id.in_(missing)))
 
     return {
-        row.id: MarkSetRow(
-            id=row.id,
-            marka_full=row.marka_full,
-            id_executor=row.id_executor,
-            composition_id=row.composition_id,
-            status_id=row.status_id,
-        )
-        for row in rows
+        package.id: _package_row(package, marka_full, composition_id)
+        for package, marka_full, composition_id, _department_id in rows
     }
 
 
-async def _load_work_plans(
+async def _load_plan_spans(
     db: AsyncSession,
     employee_ids: list[int],
-) -> dict[tuple[int, int], WorkPlanInfo]:
-    """Активные планы инженеров — шапки с границами.
+) -> dict[tuple[int, int], PlanSpanInfo]:
+    """Сводка плана инженеров: границы и объём по каждому пакету.
 
-    Отбор по инженеру, а не по шифру: у человека все его планы, включая
-    выходящие за края интервала. Их границы нужны сетке (колонка «дн.»
-    показывает объём целиком, а не обрезанный окном).
-
-    archived не берём: это история, в сетке ей места нет, и на
-    idx_one_active_plan она не влияет.
+    Шапки плана нет — сводка считается одним агрегирующим запросом по
+    ячейкам. Отбор по инженеру, без ограничения интервалом: колонка
+    «дн.» показывает объём целиком, а не обрезанный окном.
     """
-    stmt = select(WorkPlan).where(
-        WorkPlan.employee_id.in_(employee_ids),
-        WorkPlan.status.in_(("draft", "confirmed")),
-    )
-    rows = (await db.execute(stmt)).scalars().all()
-    return {
-        (row.mark_set_id, row.employee_id): WorkPlanInfo(
-            id=row.id,
-            mark_set_id=row.mark_set_id,
-            employee_id=row.employee_id,
-            start_date=row.start_date,
-            end_date=row.end_date,
-            work_days=row.work_days,
-            status=row.status,
+    stmt = (
+        select(
+            PlanCalendarCell.package_id,
+            PlanCalendarCell.employee_id,
+            func.min(PlanCalendarCell.work_date),
+            func.max(PlanCalendarCell.work_date),
+            func.count(PlanCalendarCell.id),
         )
-        for row in rows
+        .where(PlanCalendarCell.employee_id.in_(employee_ids))
+        .group_by(PlanCalendarCell.package_id, PlanCalendarCell.employee_id)
+    )
+    rows = (await db.execute(stmt)).all()
+    return {
+        (package_id, emp_id): PlanSpanInfo(
+            start_date=first_day,
+            end_date=last_day,
+            work_days=days,
+        )
+        for package_id, emp_id, first_day, last_day, days in rows
     }
 
 
@@ -496,22 +542,18 @@ async def load_context(
             absences={},
             plan_cells={},
             fact_cells={},
-            mark_sets={},
-            work_plans={},
+            packages={},
+            plan_spans={},
         )
 
     absences = await _load_absences(db, employee_ids, date_from, date_to)
-    plan_cells = await _load_plan_cells(
-        db, employee_ids, date_from, date_to
-    )
-    fact_cells = await _load_fact_cells(
-        db, employee_ids, date_from, date_to
-    )
-    # После ячеек: дотягивает шифры, засветившиеся только в них.
-    mark_sets = await _load_mark_sets(
+    plan_cells = await _load_plan_cells(db, employee_ids, date_from, date_to)
+    fact_cells = await _load_fact_cells(db, employee_ids, date_from, date_to)
+    # После ячеек: дотягивает пакеты, засветившиеся только в них.
+    packages = await _load_packages(
         db, employee_ids, plan_cells, fact_cells, executor_status_ids
     )
-    work_plans = await _load_work_plans(db, employee_ids)
+    plan_spans = await _load_plan_spans(db, employee_ids)
 
     return AvailabilityContext(
         date_from=date_from,
@@ -523,8 +565,8 @@ async def load_context(
         absences=absences,
         plan_cells=plan_cells,
         fact_cells=fact_cells,
-        mark_sets=mark_sets,
-        work_plans=work_plans,
+        packages=packages,
+        plan_spans=plan_spans,
     )
 
 
@@ -532,15 +574,16 @@ async def load_context(
 # Сборка сетки загрузки
 # ---------------------------------------------------------------------------
 
-async def load_set_status_names(db: AsyncSession) -> dict[int, str]:
-    """Справочник статусов шифра: id → название.
+async def load_package_status_names(db: AsyncSession) -> dict[int, str]:
+    """Справочник статусов пакета: id → название.
 
-    Четыре строки — отдельный крошечный запрос дешевле, чем тянуть
-    название через все загрузчики шифров. Нужен для метки статуса в
-    строке сетки и для текста отказа SET_CLOSED.
+    Шесть строк — отдельный крошечный запрос дешевле, чем тянуть
+    название через все загрузчики пакетов. Нужен для метки статуса в
+    строке сетки и для текста отказа PACKAGE_CLOSED.
     """
-    rows = await db.execute(select(SetStatus.id, SetStatus.name))
+    rows = await db.execute(select(PackageStatus.id, PackageStatus.name))
     return {status_id: name for status_id, name in rows.all()}
+
 
 async def get_availability(
     db: AsyncSession,
@@ -583,7 +626,7 @@ async def get_availability(
     ctx = await load_context(
         db, employees=employees, date_from=date_from, date_to=date_to
     )
-    status_names = await load_set_status_names(db)
+    status_names = await load_package_status_names(db)
     return _build_grid(ctx, status_names)
 
 
@@ -591,70 +634,67 @@ def _collect_rows(
     ctx: AvailabilityContext,
     status_names: dict[int, str],
 ) -> list[RowOut]:
-    """Строит строки сетки — пары (инженер, шифр) из трёх источников.
+    """Строит строки сетки — пары (инженер, пакет) из трёх источников.
 
-    Источники те же, что в _load_mark_sets: назначенный исполнитель,
-    плановые ячейки, фактические ячейки. Здесь они раскладываются по
-    инженерам, а там просто собирались шифры.
-    status_names — справочник статусов (load_set_status_names): название
-    для метки в строке. Допустимость плана (allows_plan) считается
-    правилом set_allows_plan, а не фронтом.
+    Источники те же, что в _load_packages: исполнитель пакета, плановые
+    ячейки, фактические ячейки. Здесь они раскладываются по инженерам, а
+    там просто собирались пакеты.
+    status_names — справочник статусов пакета: название для метки в
+    строке. Допустимость плана (allows_plan) считается правилом
+    package_allows_plan, а не фронтом.
     """
-    # Множество шифров под каждым инженером. Порядок сборки неважен —
+    # Множество пакетов под каждым инженером. Порядок сборки неважен —
     # сортировка в конце.
     pairs: dict[int, set[int]] = {emp_id: set() for emp_id in ctx.employees}
 
-    # Источник 1: назначенный исполнитель.
-    for candidate in ctx.mark_sets.values():
-        if candidate.id_executor in pairs:
-            pairs[candidate.id_executor].add(candidate.id)
+    # Источник 1: исполнитель пакета.
+    for candidate in ctx.packages.values():
+        if candidate.executor_id in pairs:
+            pairs[candidate.executor_id].add(candidate.id)
 
-    # Источники 2 и 3: шифры, засветившиеся в ячейках инженера.
+    # Источники 2 и 3: пакеты, засветившиеся в ячейках инженера.
     for (emp_id, _work_date), plan_cell in ctx.plan_cells.items():
         if emp_id in pairs:
-            pairs[emp_id].add(plan_cell.mark_set_id)
+            pairs[emp_id].add(plan_cell.package_id)
     for (emp_id, _work_date), fact in ctx.fact_cells.items():
         if emp_id in pairs:
-            pairs[emp_id].add(fact.mark_set_id)
+            pairs[emp_id].add(fact.package_id)
 
     rows: list[RowOut] = []
-    for emp_id, mark_set_ids in pairs.items():
-        for mark_set_id in mark_set_ids:
-            mark_set = ctx.mark_sets.get(mark_set_id)
-            if mark_set is None:
-                # Шифр есть в ячейках, но не догрузился в mark_sets.
-                # Штатно невозможно (_load_mark_sets дотягивает такие),
-                # но пропуск безопаснее падения на отрисовке.
-                logger.warning(
-                    "Шифр %s отсутствует в контексте сетки", mark_set_id
-                )
+    for emp_id, package_ids in pairs.items():
+        for package_id in package_ids:
+            package = ctx.packages.get(package_id)
+            if package is None:
+                # Пакет есть в ячейках, но не догрузился в packages.
+                # Штатно невозможно (_load_packages дотягивает такие), но
+                # пропуск безопаснее падения на отрисовке.
+                logger.warning("Пакет %s отсутствует в контексте сетки", package_id)
                 continue
 
-            plan = ctx.work_plans.get((mark_set_id, emp_id))
+            span = ctx.plan_spans.get((package_id, emp_id))
             rows.append(
                 RowOut(
                     employee_id=emp_id,
-                    mark_set_id=mark_set_id,
-                    marka_full=mark_set.marka_full,
-                    status_id=mark_set.status_id,
-                    status_name=(
-                        status_names.get(mark_set.status_id)
-                        if mark_set.status_id is not None
-                        else None
-                    ),
-                    allows_plan=set_allows_plan(mark_set.status_id),
-                    is_executor=mark_set.id_executor == emp_id,
-                    work_plan_id=plan.id if plan else None,
-                    start_date=plan.start_date if plan else None,
-                    end_date=plan.end_date if plan else None,
-                    work_days=plan.work_days if plan else None,
+                    package_id=package_id,
+                    label=package.label,
+                    status_id=package.status_id,
+                    # Индексом, а не .get(): статус пакета обязателен и
+                    # ссылается на справочник внешним ключом. Пропажа
+                    # названия — ошибка загрузки, её лучше увидеть сразу.
+                    status_name=status_names[package.status_id],
+                    allows_plan=package_allows_plan(package.status_id),
+                    is_executor=package.executor_id == emp_id,
+                    start_date=span.start_date if span else None,
+                    end_date=span.end_date if span else None,
+                    work_days=span.work_days if span else None,
                 )
             )
 
-    # Устойчивый порядок: инженер, затем шифр по алфавиту. Без сортировки
-    # порядок строк менялся бы от запроса к запросу (обход множества), и
-    # сетка «прыгала» бы при каждом обновлении.
-    rows.sort(key=lambda row: (row.employee_id, row.marka_full))
+    # Устойчивый порядок: инженер, затем подпись пакета по алфавиту —
+    # она начинается с шифра, поэтому пакеты одного комплекта идут
+    # подряд. Без сортировки порядок строк менялся бы от запроса к
+    # запросу (обход множества), и сетка «прыгала» бы.
+    rows.sort(key=lambda row: (row.employee_id, row.label))
     return rows
 
 
@@ -702,32 +742,33 @@ def _collect_cells(ctx: AvailabilityContext) -> list[CellOut]:
     их комбинация: только план — синий, план и факт — зелёный, только
     факт — оранжевый.
     """
-    # Ключ (инженер, шифр, дата) → [есть план, есть факт].
+    # Ключ (инженер, пакет, дата) → [есть план, есть факт].
     merged: dict[tuple[int, int, date], list[bool]] = {}
 
     for (emp_id, work_date), plan in ctx.plan_cells.items():
-        key = (emp_id, plan.mark_set_id, work_date)
+        key = (emp_id, plan.package_id, work_date)
         merged.setdefault(key, [False, False])[0] = True
 
     for (emp_id, work_date), fact in ctx.fact_cells.items():
-        key = (emp_id, fact.mark_set_id, work_date)
+        key = (emp_id, fact.package_id, work_date)
         merged.setdefault(key, [False, False])[1] = True
 
     cells = [
         CellOut(
             employee_id=emp_id,
-            mark_set_id=mark_set_id,
+            package_id=package_id,
             work_date=work_date,
             has_plan=has_plan,
             has_fact=has_fact,
         )
-        for (emp_id, mark_set_id, work_date), (
+        for (emp_id, package_id, work_date), (
             has_plan,
             has_fact,
         ) in merged.items()
     ]
     cells.sort(key=lambda cell: (cell.employee_id, cell.work_date))
     return cells
+
 
 def grid_rows_and_cells(
     ctx: AvailabilityContext,
@@ -742,6 +783,7 @@ def grid_rows_and_cells(
     внутренними, и чужой модуль зависит от одной явной точки входа.
     """
     return _collect_rows(ctx, status_names), _collect_cells(ctx)
+
 
 def _build_grid(
     ctx: AvailabilityContext,
@@ -775,40 +817,29 @@ def _build_grid(
     )
 
 
-
-# Статус создаваемого плана. Решено: сохранение сразу создаёт confirmed —
-# черновика в интерфейсе нет, между «спланировал» и «подтвердил» никто
-# ничего не делает. server_default='draft' в модели остаётся
-# неиспользованным, поэтому статус пишем явно.
-PLAN_STATUS_ACTIVE = "confirmed"
+class PackageNotFoundError(PlanningError):
+    """Пакет из операции не существует."""
 
 
-class MarkSetNotFoundError(PlanningError):
-    """Шифр из операции не существует."""
-
-
-class MarkSetForbiddenError(PlanningError):
-    """Шифр принадлежит подразделению вне области управления."""
+class PackageForbiddenError(PlanningError):
+    """Пакет принадлежит подразделению вне области управления."""
 
 
 class NoExecutorError(PlanningError):
-    """У шифра не назначен исполнитель — планировать некого."""
+    """У пакета не назначен исполнитель — планировать некого."""
 
 
-def _executor_of(mark_set: MarkSetRow) -> int:
-    """Исполнитель шифра в контуре записи — гарантированно число.
+def _executor_of(package: PackageRow) -> int:
+    """Исполнитель пакета в контуре записи — гарантированно число.
 
-    _load_operation_mark_sets уже отказал (NoExecutorError) для шифров
-    без исполнителя, так что None здесь невозможен. Функция делает эту
-    гарантию видимой: тип int говорит и читателю, и mypy, что исполнитель
-    есть. Если однажды загрузчик изменят и гарантия пропадёт, ошибка
-    будет понятной, а не TypeError где-то в глубине записи.
+    Нужен только для ДОБАВЛЕНИЯ: _load_operation_packages уже отказал
+    (NoExecutorError) для пакетов без исполнителя, в которые что-то
+    добавляют. Функция делает эту гарантию видимой: тип int говорит и
+    читателю, и mypy, что исполнитель есть.
     """
-    if mark_set.id_executor is None:
-        raise NoExecutorError(
-            f"У шифра {mark_set.marka_full} не назначен исполнитель"
-        )
-    return mark_set.id_executor
+    if package.executor_id is None:
+        raise NoExecutorError(f"У пакета {package.label} не назначен исполнитель")
+    return package.executor_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -821,16 +852,17 @@ class RejectedOperation:
     от того, поймала его проверка или проигранная гонка.
     """
 
-    mark_set_id: int
+    package_id: int
     work_date: date
     state: DayState
-    # BUSY / HAS_FACT: шифр, которым занят день.
-    conflicting_marka: Optional[str] = None
+    # BUSY / HAS_FACT / DAY_TAKEN / PACKAGE_CLOSED: подпись пакета,
+    # которым занят день или который закрыт.
+    conflicting_label: Optional[str] = None
     # DAY_TAKEN: чей план занимает дату.
     conflicting_employee: Optional[str] = None
     # ABSENCE: буква табеля.
     tab_letter: Optional[str] = None
-    # SET_CLOSED: название статуса шифра («Выпущен», «На проверке»).
+    # PACKAGE_CLOSED: название статуса пакета («Готово», «Приостановлен»).
     status_name: Optional[str] = None
 
 
@@ -857,9 +889,9 @@ async def resolve_employees_by_ids(
     """Инженеры по списку id с границами их назначений.
 
     Отличие от resolve_bureau_employees: отбор идёт по людям, а не по
-    подразделению. В контуре записи инженер берётся из id_executor шифра,
-    и бюро тут вообще ни при чём — шифр может принадлежать одному
-    подразделению, а человек числиться в другом.
+    подразделению. В контуре записи инженер берётся из исполнителя
+    пакета, и бюро тут вообще ни при чём — пакет может принадлежать
+    одному подразделению, а человек числиться в другом.
 
     Назначения схлопываются по всем подразделениям сразу: правило
     NOT_ASSIGNED здесь отвечает на вопрос «работал ли человек в
@@ -918,123 +950,88 @@ async def resolve_employees_by_ids(
     return employees
 
 
-async def _load_operation_mark_sets(
+async def _load_operation_packages(
     db: AsyncSession,
     scope: Scope,
-    mark_set_ids: set[int],
-) -> dict[int, MarkSetRow]:
-    """Шифры из операций с проверкой существования, области и исполнителя.
+    package_ids: set[int],
+    adding_ids: set[int],
+) -> dict[int, PackageRow]:
+    """Пакеты из операций с проверкой существования, области и исполнителя.
 
     Подразделение берётся через строку состава (project_composition):
-    у самого комплекта отдела нет, он наследует его от задания ГИПа.
+    у пакета и комплекта своего отдела нет, они наследуют его от
+    задания ГИПа.
 
-    Все три проверки — до записи и до сбора контекста: незачем читать
+    Исполнитель обязателен только у пакетов из adding_ids — тех, куда
+    что-то ДОБАВЛЯЮТ: плановой ячейке нужен человек. Снять день можно
+    и с пакета без исполнителя — начальник мог снять назначение уже
+    после раскладки, и остаток плана иначе стал бы неснимаемым.
+
+    Все проверки — до записи и до сбора контекста: незачем читать
     календарь ради операции, которая всё равно будет отвергнута.
     """
-    stmt = (
-        select(ProjectMarkSet, ProjectComposition.department_id)
-        .join(
-            ProjectComposition,
-            ProjectComposition.id == ProjectMarkSet.composition_id,
-        )
-        .where(ProjectMarkSet.id.in_(mark_set_ids))
-    )
-    rows = (await db.execute(stmt)).all()
+    rows = await _fetch_packages(db, WorkPackage.id.in_(package_ids))
 
-    found: dict[int, MarkSetRow] = {}
-    for mark_set, department_id in rows:
+    found: dict[int, PackageRow] = {}
+    for package, marka_full, composition_id, department_id in rows:
         # Область управления. can_manage сам обрабатывает админа.
         if not scope.can_manage(department_id):
-            raise MarkSetForbiddenError("Шифр вне области управления")
-        # Плана без человека не бывает: work_plan.employee_id NOT NULL.
-        if mark_set.id_executor is None:
-            raise NoExecutorError(
-                f"У шифра {mark_set.marka_full} не назначен исполнитель"
-            )
-        found[mark_set.id] = MarkSetRow(
-            id=mark_set.id,
-            marka_full=mark_set.marka_full,
-            id_executor=mark_set.id_executor,
-            composition_id=mark_set.composition_id,
-            status_id=mark_set.status_id,
-        )
+            raise PackageForbiddenError("Пакет вне области управления")
+        row = _package_row(package, marka_full, composition_id)
+        if package.id in adding_ids and row.executor_id is None:
+            raise NoExecutorError(f"У пакета {row.label} не назначен исполнитель")
+        found[package.id] = row
 
-    missing = mark_set_ids - set(found)
+    missing = package_ids - set(found)
     if missing:
         # Конкретные id наружу не отдаём (правило 18) — только в лог.
-        logger.warning("Шифры не найдены: %s", sorted(missing))
-        raise MarkSetNotFoundError("Шифр не найден")
+        logger.warning("Пакеты не найдены: %s", sorted(missing))
+        raise PackageNotFoundError("Пакет не найден")
 
     return found
 
 
-# ПРАВКА app/api/v1/planning/service.py
-#
-# ШАГ 1. В rules.py, в конец класса DayState, добавить восьмое значение:
-#
-#     # Дата уже занята планом ЭТОГО шифра — возможно, за другим
-#     # человеком. Состояние только для отказа: day_verdict его не
-#     # выдаёт, потому что отвечает на вопрос про день инженера, а это
-#     # правило про день шифра.
-#     DAY_TAKEN = "day_taken"
-#
-# ШАГ 2. В service.py добавить поле в RejectedOperation, после
-#        conflicting_marka:
-#
-#     # DAY_TAKEN: чей план занимает дату.
-#     conflicting_employee: Optional[str] = None
-#
-# ШАГ 3. ЗАМЕНИТЬ функции _validate_operations и apply_changes на
-#        версии ниже и добавить _load_mark_set_occupancy.
-# ---------------------------------------------------------------------------
-
-
-async def _load_mark_set_occupancy(
+async def _load_package_occupancy(
     db: AsyncSession,
-    mark_set_ids: set[int],
+    package_ids: set[int],
     date_from: date,
     date_to: date,
-) -> dict[tuple[int, date], tuple[int, int]]:
-    """Кто занимает дни этих шифров: (шифр, дата) → (инженер, план).
+) -> dict[tuple[int, date], int]:
+    """Кто занимает дни этих пакетов: (пакет, дата) → инженер.
 
-    Отбор идёт по ШИФРУ, а не по инженеру — в этом вся суть. Плановая
+    Отбор идёт по ПАКЕТУ, а не по инженеру — в этом вся суть. Плановая
     ячейка могла остаться за прежним исполнителем, и он не попадёт ни в
     одну выборку «по людям»: в сетке бюро его может не быть вовсе, если
     он перешёл в другое подразделение.
 
-    На этой выборке держатся оба новых правила:
-      - дата шифра планируется один раз, кем бы то ни было;
+    На этой выборке держатся два правила:
+      - дата пакета планируется один раз, кем бы то ни было;
       - снять план может кто угодно, а не только текущий исполнитель.
 
-    Второе следует из первого: раз ячейка на паре (шифр, дата) одна,
+    Второе следует из первого: раз ячейка на паре (пакет, дата) одна,
     цель удаления определяется однозначно, и передавать исполнителя в
     операции не нужно.
     """
-    stmt = (
-        select(
-            WorkPlan.mark_set_id,
-            PlanCalendarCell.work_date,
-            PlanCalendarCell.employee_id,
-            PlanCalendarCell.work_plan_id,
-        )
-        .join(WorkPlan, WorkPlan.id == PlanCalendarCell.work_plan_id)
-        .where(
-            WorkPlan.mark_set_id.in_(mark_set_ids),
-            PlanCalendarCell.work_date >= date_from,
-            PlanCalendarCell.work_date <= date_to,
-        )
+    stmt = select(
+        PlanCalendarCell.package_id,
+        PlanCalendarCell.work_date,
+        PlanCalendarCell.employee_id,
+    ).where(
+        PlanCalendarCell.package_id.in_(package_ids),
+        PlanCalendarCell.work_date >= date_from,
+        PlanCalendarCell.work_date <= date_to,
     )
     rows = (await db.execute(stmt)).all()
     return {
-        (mark_set_id, work_date): (employee_id, plan_id)
-        for mark_set_id, work_date, employee_id, plan_id in rows
+        (package_id, work_date): employee_id
+        for package_id, work_date, employee_id in rows
     }
 
 
 def _validate_operations(
     ctx: AvailabilityContext,
-    mark_sets: dict[int, MarkSetRow],
-    occupancy: dict[tuple[int, date], tuple[int, int]],
+    packages: dict[int, PackageRow],
+    occupancy: dict[tuple[int, date], int],
     operations: list[CellOperation],
     status_names: dict[int, str],
 ) -> list[RejectedOperation]:
@@ -1053,31 +1050,32 @@ def _validate_operations(
     seen: set[tuple[str, int, date]] = set()
 
     # Что освобождают удаления этой же пачки. Два среза: по паре
-    # «шифр + дата» — для правила «дата шифра одна», и по паре
+    # «пакет + дата» — для правила «дата пакета одна», и по паре
     # «инженер + дата» — для проверки занятости человека.
-    freed_on_set: set[tuple[int, date]] = set()
+    freed_on_package: set[tuple[int, date]] = set()
     freed_on_day: set[tuple[int, date]] = set()
     for operation in operations:
         if operation.op != "remove":
             continue
-        key = (operation.mark_set_id, operation.work_date)
+        key = (operation.package_id, operation.work_date)
         occupant = occupancy.get(key)
         if occupant is not None:
-            freed_on_set.add(key)
-            freed_on_day.add((occupant[0], operation.work_date))
+            freed_on_package.add(key)
+            freed_on_day.add((occupant, operation.work_date))
 
     for operation in operations:
-        mark_set = mark_sets[operation.mark_set_id]
-        set_key = (operation.mark_set_id, operation.work_date)
+        package = packages[operation.package_id]
+        package_key = (operation.package_id, operation.work_date)
+
         # Повтор ловим по ТРОЙКЕ, включая вид операции: снять день у
         # одного и отдать его другому — это две операции на одну пару
-        # «шифр + дата», и они законны. Противоречием остаётся только
+        # «пакет + дата», и они законны. Противоречием остаётся только
         # буквальный дубль: два add или два remove подряд.
-        dup_key = (operation.op, operation.mark_set_id, operation.work_date)
-        if dup_key in seen:       
+        dup_key = (operation.op, operation.package_id, operation.work_date)
+        if dup_key in seen:
             rejections.append(
                 RejectedOperation(
-                    mark_set_id=operation.mark_set_id,
+                    package_id=operation.package_id,
                     work_date=operation.work_date,
                     state=DayState.DAY_TAKEN,
                 )
@@ -1085,47 +1083,44 @@ def _validate_operations(
             continue
         seen.add(dup_key)
 
-        occupant = occupancy.get(set_key)
-        occupied = occupant is not None and set_key not in freed_on_set
+        occupant = occupancy.get(package_key)
+        occupied = occupant is not None and package_key not in freed_on_package
 
         if operation.op == "add":
-            # Закрытый шифр (на проверке, выпущен) планировать нельзя.
-            # Проверяется первым: на закрытом комплекте занятость дня уже
-            # ничего не решает. Снятие (remove) разрешено при любом
-            # статусе — им начальник освобождает инженеру будущие дни.
-            if not set_allows_plan(mark_set.status_id):
+            # Пакет не «В работе» планировать нельзя. Проверяется первым:
+            # на закрытом пакете занятость дня уже ничего не решает.
+            # Снятие (remove) разрешено при любом статусе — им начальник
+            # освобождает инженеру будущие дни.
+            if not package_allows_plan(package.status_id):
                 rejections.append(
                     RejectedOperation(
-                        mark_set_id=operation.mark_set_id,
+                        package_id=operation.package_id,
                         work_date=operation.work_date,
-                        state=DayState.SET_CLOSED,
-                        conflicting_marka=mark_set.marka_full,
-                        status_name=(
-                            status_names.get(mark_set.status_id)
-                            if mark_set.status_id is not None
-                            else None
-                        ),
+                        state=DayState.PACKAGE_CLOSED,
+                        conflicting_label=package.label,
+                        status_name=status_names.get(package.status_id),
                     )
                 )
                 continue
-            # Исполнитель выводится из шифра, а не из запроса: подмена
-            # id не позволит запланировать работу чужому человеку.
-            employee_id = _executor_of(mark_set)
 
-            # Правило «дата шифра планируется один раз». Проверяется
+            # Исполнитель выводится из пакета, а не из запроса: подмена
+            # id не позволит запланировать работу чужому человеку.
+            employee_id = _executor_of(package)
+
+            # Правило «дата пакета планируется один раз». Проверяется
             # раньше вердикта: две записи об одном дне работы означали бы
             # двойной счёт трудозатрат, и это важнее того, свободен ли
             # день у самого исполнителя.
             # occupant is not None уже входит в occupied; повторено явно,
             # чтобы проверка была видна и читателю, и mypy.
             if occupied and occupant is not None:
-                owner = ctx.employees.get(occupant[0])
+                owner = ctx.employees.get(occupant)
                 rejections.append(
                     RejectedOperation(
-                        mark_set_id=operation.mark_set_id,
+                        package_id=operation.package_id,
                         work_date=operation.work_date,
                         state=DayState.DAY_TAKEN,
-                        conflicting_marka=mark_set.marka_full,
+                        conflicting_label=package.label,
                         conflicting_employee=owner.full_name if owner else None,
                     )
                 )
@@ -1134,6 +1129,7 @@ def _validate_operations(
             verdict = day_verdict(ctx, employee_id, operation.work_date)
             if verdict.is_free:
                 continue
+
             # BUSY на дне, который эта же пачка освобождает, — не
             # препятствие: удаления выполняются раньше вставок.
             if (
@@ -1141,25 +1137,26 @@ def _validate_operations(
                 and (employee_id, operation.work_date) in freed_on_day
             ):
                 continue
+
             rejections.append(
                 RejectedOperation(
-                    mark_set_id=operation.mark_set_id,
+                    package_id=operation.package_id,
                     work_date=operation.work_date,
                     state=verdict.state,
-                    conflicting_marka=verdict.marka_full,
+                    conflicting_label=verdict.label,
                     tab_letter=verdict.tab_letter,
                 )
             )
             continue
 
-        # op == "remove". Цель определяется парой «шифр + дата», а не
+        # op == "remove". Цель определяется парой «пакет + дата», а не
         # исполнителем: план мог остаться за прежним. Снятие ничего не
         # создаёт и никого не занимает, поэтому текущее назначение здесь
         # не проверяется вовсе.
         if occupant is None:
             rejections.append(
                 RejectedOperation(
-                    mark_set_id=operation.mark_set_id,
+                    package_id=operation.package_id,
                     work_date=operation.work_date,
                     state=DayState.FREE,
                 )
@@ -1169,15 +1166,14 @@ def _validate_operations(
         # День с фактом заперт: удаление плана под фактом искажает
         # сравнение сильнее, чем добавление. Факт сверяется у ВЛАДЕЛЬЦА
         # ячейки, а не у текущего исполнителя.
-        owner_id = occupant[0]
-        fact = ctx.fact_cells.get((owner_id, operation.work_date))
-        if fact is not None and fact.mark_set_id == operation.mark_set_id:
+        fact = ctx.fact_cells.get((occupant, operation.work_date))
+        if fact is not None and fact.package_id == operation.package_id:
             rejections.append(
                 RejectedOperation(
-                    mark_set_id=operation.mark_set_id,
+                    package_id=operation.package_id,
                     work_date=operation.work_date,
                     state=DayState.HAS_FACT,
-                    conflicting_marka=fact.marka_full,
+                    conflicting_label=fact.label,
                 )
             )
 
@@ -1192,105 +1188,93 @@ async def apply_changes(
 ) -> ApplyResult:
     """Применяет пачку изменений плановых ячеек одной транзакцией.
 
-    Единственное место, которое меняет данные планирования.
+    Единственное место, которое меняет план из сетки начальника.
 
-    Порядок: проверка шифров → занятость дат шифра → снимок по всем
-    причастным людям → проверка операций → удаления → добавления с
-    пересчётом шапок → commit → свежее состояние в ответ.
+    Порядок: проверка пакетов → занятость дат пакета → снимок по всем
+    причастным людям → проверка операций → удаления → добавления →
+    commit → свежее состояние в ответ.
 
-    Причастные — это исполнители шифров ПЛЮС владельцы существующих
-    ячеек. Вторые могут быть кем угодно, включая людей из других
-    подразделений: план остаётся за прежним исполнителем, когда шифр
-    передают. Без них снимок был бы неполон, и проверка факта на
+    Причастные — это исполнители пакетов, куда добавляют, ПЛЮС владельцы
+    существующих ячеек. Вторые могут быть кем угодно, включая людей из
+    других подразделений: план остаётся за прежним исполнителем, когда
+    пакет передают. Без них снимок был бы неполон, и проверка факта на
     удаляемом дне сработала бы вхолостую.
 
     Гонка между проверкой и вставкой возможна: два начальника могут
-    планировать один шифр одновременно. Данные при этом в безопасности —
-    unique_plan_cell не даст одному человеку два плана на день. Поймав
-    23505, откатываемся и ПОВТОРНО ПРОВЕРЯЕМ операции на свежем снимке:
-    повторять саму запись смысла нет, под правилом «всё или ничего»
-    результат был бы тем же отказом, зато диагностика превращает
-    «конфликт записи» в «17.09 занят шифром 053-22-14а-ЭМ».
+    планировать одного инженера одновременно. Данные при этом в
+    безопасности — unique_plan_cell не даст одному человеку два плана на
+    день. Поймав 23505, откатываемся и ПОВТОРНО ПРОВЕРЯЕМ операции на
+    свежем снимке: повторять саму запись смысла нет, под правилом «всё
+    или ничего» результат был бы тем же отказом, зато диагностика
+    превращает «конфликт записи» в «17.09 занят пакетом ...».
     """
     if not operations:
         raise OperationsRejectedError([])
 
-    mark_set_ids = {operation.mark_set_id for operation in operations}
-    mark_sets = await _load_operation_mark_sets(db, scope, mark_set_ids)
-    # Справочник статусов: для отказа SET_CLOSED и для строк ответа.
-    status_names = await load_set_status_names(db)    
+    package_ids = {operation.package_id for operation in operations}
+    adding_ids = {op.package_id for op in operations if op.op == "add"}
+    packages = await _load_operation_packages(db, scope, package_ids, adding_ids)
+    # Справочник статусов: для отказа PACKAGE_CLOSED и для строк ответа.
+    status_names = await load_package_status_names(db)
 
     # Границы снимка — только затронутые даты, обычно несколько дней.
     dates = [operation.work_date for operation in operations]
     date_from, date_to = min(dates), max(dates)
 
-    occupancy = await _load_mark_set_occupancy(
-        db, mark_set_ids, date_from, date_to
-    )
+    occupancy = await _load_package_occupancy(db, package_ids, date_from, date_to)
 
     employee_ids = sorted(
-        {_executor_of(mark_set) for mark_set in mark_sets.values()}
-        | {owner for owner, _plan_id in occupancy.values()}
+        {_executor_of(packages[package_id]) for package_id in adding_ids}
+        | set(occupancy.values())
     )
 
-    employees = await resolve_employees_by_ids(
-        db, employee_ids, date_from, date_to
-    )
+    employees = await resolve_employees_by_ids(db, employee_ids, date_from, date_to)
     ctx = await load_context(
         db, employees=employees, date_from=date_from, date_to=date_to
     )
 
     rejections = _validate_operations(
-        ctx, mark_sets, occupancy, operations, status_names
+        ctx, packages, occupancy, operations, status_names
     )
     if rejections:
         raise OperationsRejectedError(rejections)
 
-    # Группировка по плану: пара (шифр, инженер) — тот же ключ, что у
-    # idx_one_active_plan. Для добавлений инженер берётся из шифра, для
-    # удалений — из владельца ячейки: он может быть другим человеком.
+    # Группировка по паре (пакет, инженер). Для добавлений инженер
+    # берётся из пакета, для удалений — из владельца ячейки: он может
+    # быть другим человеком.
     added: dict[tuple[int, int], list[date]] = {}
     removed: dict[tuple[int, int], list[date]] = {}
     for operation in operations:
         if operation.op == "add":
             key = (
-                operation.mark_set_id,
-                _executor_of(mark_sets[operation.mark_set_id]),
+                operation.package_id,
+                _executor_of(packages[operation.package_id]),
             )
             added.setdefault(key, []).append(operation.work_date)
         else:
-            owner_id = occupancy[
-                (operation.mark_set_id, operation.work_date)
-            ][0]
-            key = (operation.mark_set_id, owner_id)
+            owner_id = occupancy[(operation.package_id, operation.work_date)]
+            key = (operation.package_id, owner_id)
             removed.setdefault(key, []).append(operation.work_date)
 
     try:
-        # Сначала ВСЕ удаления по всем планам, только потом добавления.
-        # Межплановый порядок обязателен: перенос дня между шифрами или
-        # между людьми иначе упрётся в unique_plan_cell.
-        for (mark_set_id, employee_id), work_dates in removed.items():
-            plan = ctx.work_plans.get((mark_set_id, employee_id))
-            if plan is None:
-                continue
+        # Сначала ВСЕ удаления, только потом добавления. Порядок
+        # обязателен: перенос дня между пакетами или между людьми иначе
+        # упрётся в unique_plan_cell.
+        for (package_id, employee_id), work_dates in removed.items():
             await db.execute(
                 delete(PlanCalendarCell).where(
-                    PlanCalendarCell.work_plan_id == plan.id,
+                    PlanCalendarCell.package_id == package_id,
+                    PlanCalendarCell.employee_id == employee_id,
                     PlanCalendarCell.work_date.in_(work_dates),
                 )
             )
 
-        # Затронутые планы: и те, куда добавляли, и те, откуда убирали —
-        # вторым тоже нужен пересчёт шапки.
-        touched = set(added) | set(removed)
-        for mark_set_id, employee_id in touched:
-            plan = ctx.work_plans.get((mark_set_id, employee_id))
-            await rebuild_plan(
+        for (package_id, employee_id), work_dates in added.items():
+            await add_plan_cells(
                 db,
-                mark_set_id=mark_set_id,
+                package_id=package_id,
                 employee_id=employee_id,
-                plan_id=plan.id if plan else None,
-                added=added.get((mark_set_id, employee_id), []),
+                work_dates=work_dates,
             )
 
         await db.commit()
@@ -1301,26 +1285,22 @@ async def apply_changes(
         await db.rollback()
         logger.info("Конфликт записи плановых ячеек, повторная проверка")
 
-        fresh_occupancy = await _load_mark_set_occupancy(
-            db, mark_set_ids, date_from, date_to
+        fresh_occupancy = await _load_package_occupancy(
+            db, package_ids, date_from, date_to
         )
-        employees = await resolve_employees_by_ids(
-            db, employee_ids, date_from, date_to
-        )
+        employees = await resolve_employees_by_ids(db, employee_ids, date_from, date_to)
         fresh_ctx = await load_context(
             db, employees=employees, date_from=date_from, date_to=date_to
         )
         raise OperationsRejectedError(
             _validate_operations(
-                fresh_ctx, mark_sets, fresh_occupancy, operations, status_names
-              )
+                fresh_ctx, packages, fresh_occupancy, operations, status_names
+            )
         )
 
     # Свежее состояние затронутых инженеров — чтобы React перерисовал
     # без второго GET. Читаем после commit, отдельным снимком.
-    employees = await resolve_employees_by_ids(
-        db, employee_ids, date_from, date_to
-    )
+    employees = await resolve_employees_by_ids(db, employee_ids, date_from, date_to)
     result_ctx = await load_context(
         db, employees=employees, date_from=date_from, date_to=date_to
     )
@@ -1333,103 +1313,39 @@ async def apply_changes(
     )
 
 
-async def rebuild_plan(
+async def add_plan_cells(
     db: AsyncSession,
     *,
-    mark_set_id: int,
+    package_id: int,
     employee_id: int,
-    plan_id: Optional[int],
-    added: list[date],
+    work_dates: list[date],
 ) -> None:
-    """Досоздаёт ячейки одного плана и пересчитывает его шапку.
+    """Вставляет плановые ячейки одного инженера по одному пакету.
 
-    Удаления к этому моменту уже выполнены вызывающей стороной — они
-    обязаны пройти по ВСЕМ планам раньше любой вставки. Причина: перенос
-    дня с шифра на шифр в пределах одной даты обычен, и положи мы новую
-    ячейку до удаления старой, INSERT упёрся бы в unique_plan_cell.
+    Одной вставкой на пачку дат, без пересчёта: шапки плана нет, сводка
+    вычисляется при чтении. Удаления к этому моменту уже выполнены
+    вызывающей стороной — они обязаны пройти раньше любой вставки:
+    перенос дня с пакета на пакет в пределах одной даты обычен, и положи
+    мы новую ячейку до удаления старой, INSERT упёрся бы в
+    unique_plan_cell.
 
-    Порядок внутри функции:
-
-    1. Создание шапки, если плана ещё нет. Пустую шапку завести нельзя:
-       start_date объявлен NOT NULL, а CHECK требует work_days > 0.
-       Поэтому границы считаются до вставки, пусть и предварительно.
-    2. Вставка ячеек пачкой.
-    3. Пересчёт границ ОДНИМ запросом, после всех вставок.
-
-    Пункт 3 именно последний, пока жив триггер trg_update_end_date: он
-    пересчитывает end_date на каждой вставленной строке и затёр бы
-    значение, записанное раньше. После снятия триггера порядок
-    останется верным.
-
-    updated_at ставим здесь же: триггер писал его сам, и после дропа
-    поле осталось бы осиротевшим — onupdate на стороне ORM в проекте не
-    используется.
+    Публичная: этой же функцией пишет план экран администратора.
+    Проверки правил — на вызывающей стороне.
     """
-    # 1. Шапка плана. Границы предварительные — шаг 3 их уточнит.
-    if added and plan_id is None:
-        result = await db.execute(
-            insert(WorkPlan)
-            .values(
-                mark_set_id=mark_set_id,
-                employee_id=employee_id,
-                start_date=min(added),
-                work_days=len(added),
-                status=PLAN_STATUS_ACTIVE,
-            )
-            .returning(WorkPlan.id)
-        )
-        plan_id = result.scalar_one()
-
-    # 2. Вставка ячеек. employee_id дублируется в ячейке при живом
-    # work_plan.employee_id намеренно: без него не построить
-    # unique_plan_cell (UNIQUE через join не умеет).
-    if added:
-        await db.execute(
-            insert(PlanCalendarCell),
-            [
-                {
-                    "work_plan_id": plan_id,
-                    "employee_id": employee_id,
-                    "work_date": work_date,
-                }
-                for work_date in added
-            ],
-        )
-
-    if plan_id is None:
-        # Ни добавлений, ни существующего плана — делать нечего.
+    if not work_dates:
         return
 
-    # 3. Пересчёт шапки по фактическому составу ячеек. Считаем в БД, а
-    # не в памяти: ячейки плана могут выходить за края интервала
-    # операций, и набор из контекста был бы неполным.
-    start_date, end_date, cell_count = (
-        await db.execute(
-            select(
-                func.min(PlanCalendarCell.work_date),
-                func.max(PlanCalendarCell.work_date),
-                func.count(PlanCalendarCell.id),
-            ).where(PlanCalendarCell.work_plan_id == plan_id)
-        )
-    ).one()
-
-    if cell_count == 0:
-        # Плана с нулём дней не бывает: CHECK (work_days > 0). Убрали
-        # последний день — удаляем шапку. Архивировать нечего: у пустой
-        # записи остались бы work_days от прежней раскладки, то есть
-        # цифра, которая соврёт в любом отчёте.
-        await db.execute(delete(WorkPlan).where(WorkPlan.id == plan_id))
-        return
-
+    # employee_id хранится в ячейке, а не берётся из пакета: без него не
+    # построить unique_plan_cell (UNIQUE через join не умеет), и ячейка
+    # помнит, кто должен был работать, после смены исполнителя.
     await db.execute(
-        update(WorkPlan)
-        .where(WorkPlan.id == plan_id)
-        .values(
-            start_date=start_date,
-            end_date=end_date,
-            work_days=cell_count,
-            updated_at=func.now(),
-        )
+        insert(PlanCalendarCell),
+        [
+            {
+                "package_id": package_id,
+                "employee_id": employee_id,
+                "work_date": work_date,
+            }
+            for work_date in work_dates
+        ],
     )
-
-

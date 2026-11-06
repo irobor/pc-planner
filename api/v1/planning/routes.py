@@ -33,10 +33,10 @@ from app.api.v1.planning.schemas import (
 from app.api.v1.planning.service import (
     DepartmentForbiddenError,
     InvalidIntervalError,
-    MarkSetForbiddenError,
-    MarkSetNotFoundError,
     NoExecutorError,
     OperationsRejectedError,
+    PackageForbiddenError,
+    PackageNotFoundError,
     RejectedOperation,
     apply_changes,
     get_availability,
@@ -60,12 +60,13 @@ def _describe(rejection: RejectedOperation) -> str:
     """Собирает текст отказа по причине и данным подстановки.
 
     Формулировки нейтральны: без SQL, id и внутренних деталей (правило
-    18). Шифр-конкурент показываем целиком — решение пользователя:
-    начальнику понятнее, с кем договариваться, даже если шифр из чужого
-    бюро.
+    18). Пакет-конкурент показываем целиком, с шифром, — решение
+    пользователя: начальнику понятнее, с кем договариваться, даже если
+    пакет из чужого бюро.
     """
     day = rejection.work_date.strftime("%d.%m.%Y")
     state = rejection.state
+    label = rejection.conflicting_label
 
     if state is DayState.OUT_OF_HORIZON:
         return (
@@ -78,39 +79,37 @@ def _describe(rejection: RejectedOperation) -> str:
         return f"{day}: нерабочий день."
     if state is DayState.ABSENCE:
         letter = rejection.tab_letter or "отсутствие"
-        return f"{day}: инженер отсутствует ({letter})."    
+        return f"{day}: инженер отсутствует ({letter})."
     if state is DayState.DAY_TAKEN:
+        # Имя — после двоеточия, в именительном падеже: «за Иванов»
+        # читалось бы как ошибка, а склонять фамилии в коде ненадёжно.
         who = rejection.conflicting_employee
-        suffix = f" за {who}" if who else ""
+        suffix = f" (в плане: {who})" if who else ""
         return (
-            f"{day}: дата уже запланирована по этому шифру{suffix}. "
+            f"{day}: дата уже запланирована по этому пакету{suffix}. "
             "Снимите тот день, чтобы поставить новый."
         )
     if state is DayState.HAS_FACT:
-        marka = rejection.conflicting_marka
-        suffix = f" по шифру {marka}" if marka else ""
+        suffix = f" по пакету {label}" if label else ""
         return (
             f"{day}: день уже отработан{suffix}. "
             "План на отработанный день не изменяется."
         )
-
-    if state is DayState.SET_CLOSED:
-        # Статус показываем как есть, в кавычках («Выпущен», «На
-        # проверке»): так не нужно согласовывать падеж и род.
-        marka = rejection.conflicting_marka or "Шифр"
+    if state is DayState.PACKAGE_CLOSED:
+        # Статус показываем как есть, в кавычках («Готово»,
+        # «Приостановлен»): так не нужно согласовывать падеж и род.
+        subject = f"Пакет {label}" if label else "Пакет"
         if rejection.status_name:
             reason = f"в статусе «{rejection.status_name}»"
         else:
             reason = "закрыт для планирования"
         return (
-            f"{day}: {marka} {reason} — добавлять план нельзя, "
+            f"{day}: {subject} {reason} — добавлять план нельзя, "
             "можно только снять."
         )
-    
     if state is DayState.BUSY:
-        marka = rejection.conflicting_marka
-        if marka:
-            return f"{day}: день занят шифром {marka}."
+        if label:
+            return f"{day}: день занят пакетом {label}."
         return f"{day}: день занят."
 
     # FREE в отказе означает удаление несуществующей ячейки: на клиенте
@@ -154,10 +153,10 @@ async def read_workload(
     date_from: Annotated[str, Query(description="Начало интервала")],
     date_to: Annotated[str, Query(description="Конец интервала")],
 ) -> WorkloadGrid:
-    """Отдаёт сетку загрузки: инженеры бюро, их шифры, дни и ячейки.
+    """Отдаёт сетку загрузки: инженеры бюро, их пакеты, дни и ячейки.
 
     Ответ устроен плоскими слоями (employees / rows / days / cells) —
-    дни инженера нужны сами по себе, вне привязки к шифру, и во
+    дни инженера нужны сами по себе, вне привязки к пакету, и во
     вложенном дереве их пришлось бы дублировать в каждой строке.
 
     Вердикт доступности каждого дня сервер считает сам и отдаёт в
@@ -222,7 +221,7 @@ async def write_cells(
     начальников, работающих одновременно, затирали бы работу друг друга.
 
     Исполнитель в запросе не передаётся — сервер выводит его из
-    project_mark_sets.id_executor. Подмена id не позволит запланировать
+    work_packages.executor_id. Подмена id не позволит запланировать
     работу чужому человеку.
 
     Ответ несёт свежее состояние затронутых строк и дней, поэтому после
@@ -232,11 +231,12 @@ async def write_cells(
     POST /cells     — применение пачки изменений (запись, plan:manage)
     
     Коды ошибок:
-      403 — шифр вне области управления;
-      404 — шифр не существует;
+      403 — пакет вне области управления;
+      404 — пакет не существует;
       409 — операции отклонены (день занят, отработан, выходной,
-            отсутствие) ИЛИ проиграна гонка с другим начальником;
-      422 — у шифра не назначен исполнитель.
+            отсутствие, пакет закрыт) ИЛИ проиграна гонка с другим
+            начальником;
+      422 — у пакета, в который добавляют, не назначен исполнитель.
 
     Тело 409 содержит message и rejected — список причин по каждой
     непрошедшей операции. Ни одна операция при этом не применена.
@@ -246,20 +246,20 @@ async def write_cells(
             db, scope=scope, operations=payload.operations
         )
 
-    except MarkSetNotFoundError as exc:
+    except PackageNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         )
 
-    except MarkSetForbiddenError as exc:
+    except PackageForbiddenError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         )
 
     except NoExecutorError as exc:
-        # Текст уже нейтрален и полезен (называет шифр) — берём как есть.
+        # Текст уже нейтрален и полезен (называет пакет) — берём как есть
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),

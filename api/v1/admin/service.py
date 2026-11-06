@@ -59,8 +59,7 @@ from app.api.v1.planning.rules import AvailabilityContext
 from app.api.v1.planning.service import (
     grid_rows_and_cells,
     load_context,
-    load_set_status_names,
-    rebuild_plan,
+    load_package_status_names,
     resolve_employees_by_ids,
 )
 from app.models.admin import AdminChangeItem, AdminChangeset
@@ -251,7 +250,7 @@ async def load_admin_grid(
 
     full_name = await _employee_name(db, employee_id)
     ctx = await _load_employee_context(db, employee_id, date_from, date_to)
-    status_names = await load_set_status_names(db)
+    status_names = await load_package_status_names(db)
     rows, cells = grid_rows_and_cells(ctx, status_names)
 
     return AdminGrid(
