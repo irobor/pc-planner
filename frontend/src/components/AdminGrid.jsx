@@ -1,9 +1,9 @@
 // app/frontend/src/components/AdminGrid.jsx
 // «План и факт сотрудников» — ремонтный режим администратора данных.
 //
-// Сетка ОДНОГО сотрудника: строки — шифры, в каждой клетке две полосы,
+// Сетка ОДНОГО сотрудника: строки — пакеты, в каждой клетке две полосы,
 // сверху план, снизу факт. Обе редактируются, без процессных
-// ограничений (окно отметки, блокировка плана фактом, статус шифра):
+// ограничений (окно отметки, блокировка плана фактом, статус пакета):
 // что можно поставить в день, сервер отдаёт флагами days[].plan_allowed
 // и fact_allowed. Очистить ячейку можно всегда.
 //
@@ -15,7 +15,7 @@
 // каждое условие в «если администратор — иначе».
 //
 // Несохранённая правка хранит ЖЕЛАЕМОЕ состояние ячейки «полоса + день»:
-// шифр или null (очистить). Ровно в этом виде она уходит на сервер, а
+// пакет или null (очистить). Ровно в этом виде она уходит на сервер, а
 // «было» сервер берёт из базы сам.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -23,10 +23,10 @@ import {
   fetchAdminGrid,
   fetchEmployees,
   saveAdminChanges,
-  searchAdminMarkSets,
+  searchAdminPackages,
 } from '../api/admin';
 import ChangesetJournal from './ChangesetJournal';
-import MarkSetSearch from './MarkSetSearch';
+import PackageSearch from './PackageSearch';
 
 // Окно ленты: администратор чаще исправляет прошлое, поэтому назад
 // смотрим дальше, чем вперёд (у инженера — наоборот). 6 недель.
@@ -104,25 +104,25 @@ const cellKey = (layer, iso) => `${layer}|${iso}`;
 
 /**
  * Значение ячейки с учётом несохранённой правки.
- * pending хранит желаемое состояние: шифр или null (очистить).
+ * pending хранит желаемое состояние: пакет или null (очистить).
  */
 function effectiveValue(base, pending, layer, iso) {
   const key = cellKey(layer, iso);
   return pending.has(key) ? pending.get(key) : base[layer].get(iso) ?? null;
 }
 
-/** Строки шифров в порядке сервера (посимвольно, как sort() в Python). */
-function compareMarka(a, b) {
-  if (a.marka_full === b.marka_full) {
+/** Строки пакетов в порядке сервера (посимвольно, как sort() в Python). */
+function compareLabel(a, b) {
+  if (a.label === b.label) {
     return 0;
   }
-  return a.marka_full < b.marka_full ? -1 : 1;
+  return a.label < b.label ? -1 : 1;
 }
 
 // --- полоса ----------------------------------------------------------
 
 /**
- * Одна полоса клетки (план или факт) одного шифра в один день.
+ * Одна полоса клетки (план или факт) одного пакета в один день.
  *
  * Состояния: стоит и не менялась — цвет; поставлена правкой — пунктир;
  * снята правкой — гаснущая полоса; пусто — прозрачное место (держит
@@ -179,7 +179,7 @@ export default function AdminGrid({ onSaved }) {
   // Сообщение об успехе («Правка №N сохранена»).
   const [notice, setNotice] = useState('');
 
-  // Несохранённые правки: «полоса|день» → шифр или null.
+  // Несохранённые правки: «полоса|день» → пакет или null.
   const [pending, setPending] = useState(() => new Map());
   // Строки, добавленные поиском: живут до сохранения или смены сотрудника.
   const [addedRows, setAddedRows] = useState([]);
@@ -267,16 +267,16 @@ export default function AdminGrid({ onSaved }) {
     return () => cancelAnimationFrame(frame);
   }, [grid, employeeId, windowStart]);
 
-  // Текущее состояние из базы: день → шифр, отдельно для плана и факта.
+  // Текущее состояние из базы: день → пакет, отдельно для плана и факта.
   const base = useMemo(() => {
     const plan = new Map();
     const fact = new Map();
     for (const cell of grid?.cells || []) {
       if (cell.has_plan) {
-        plan.set(cell.work_date, cell.mark_set_id);
+        plan.set(cell.work_date, cell.package_id);
       }
       if (cell.has_fact) {
-        fact.set(cell.work_date, cell.mark_set_id);
+        fact.set(cell.work_date, cell.package_id);
       }
     }
     return { plan, fact };
@@ -293,10 +293,10 @@ export default function AdminGrid({ onSaved }) {
   // Серверные строки + добавленные поиском (без повторов), внизу.
   const rows = useMemo(() => {
     const serverRows = grid?.rows || [];
-    const serverIds = new Set(serverRows.map((row) => row.mark_set_id));
+    const serverIds = new Set(serverRows.map((row) => row.package_id));
     return [
       ...serverRows,
-      ...addedRows.filter((row) => !serverIds.has(row.mark_set_id)),
+      ...addedRows.filter((row) => !serverIds.has(row.package_id)),
     ];
   }, [grid, addedRows]);
 
@@ -350,18 +350,18 @@ export default function AdminGrid({ onSaved }) {
   }
 
   /**
-   * Клик по полосе шифра в день — переключатель в столбце:
-   * в каждом дне у полосы один шифр. Клик по шифру X ставит X (если там
+   * Клик по полосе пакета в день — переключатель в столбце:
+   * в каждом дне у полосы один пакет. Клик по пакету X ставит X (если там
    * был другой — он «переезжает»); клик по уже стоящему X — очищает.
    *
    * Если желаемое совпало с базой, правка убирается из пачки: «туда и
    * обратно» не оставляет следа, как и на сервере.
    */
-  function toggleSlot(layer, markSetId, iso) {
+  function toggleSlot(layer, packageId, iso) {
     setPending((previous) => {
       const next = new Map(previous);
       const current = effectiveValue(base, previous, layer, iso);
-      const desired = current === markSetId ? null : markSetId;
+      const desired = current === packageId ? null : packageId;
       const original = base[layer].get(iso) ?? null;
       const key = cellKey(layer, iso);
       if (desired === original) {
@@ -381,8 +381,10 @@ export default function AdminGrid({ onSaved }) {
     setAddedRows((current) => [
       ...current,
       {
-        mark_set_id: item.id,
-        marka_full: item.marka_full,
+        package_id: item.id,
+        label: item.label,
+        // Статус добавленной строки неизвестен до сохранения — после
+        // него строка придёт с сервера целиком.
         status_id: null,
         status_name: null,
         is_executor: false,
@@ -397,9 +399,9 @@ export default function AdminGrid({ onSaved }) {
     if (!text || pending.size === 0) {
       return;
     }
-    const cells = [...pending].map(([key, markSetId]) => {
+    const cells = [...pending].map(([key, packageId]) => {
       const [layer, workDate] = key.split('|');
-      return { layer, work_date: workDate, mark_set_id: markSetId };
+      return { layer, work_date: workDate, package_id: packageId };
     });
 
     setSaving(true);
@@ -542,7 +544,7 @@ export default function AdminGrid({ onSaved }) {
             <table className="table table-sm workload-grid mb-0">
               <thead>
                 <tr>
-                  <th className="workload-grid__name">Шифр</th>
+                  <th className="workload-grid__name">Пакет</th>
                   {dates.map((iso) => {
                     const label = dayLabel(iso);
                     const day = dayByDate.get(iso);
@@ -577,7 +579,7 @@ export default function AdminGrid({ onSaved }) {
                   })}
                 </tr>
                 {/* Табель — буква неявки один раз на день: неявка
-                    принадлежит человеку, а не шифру. */}
+                    принадлежит человеку, а не пакету. */}
                 {hasTabRow && (
                   <tr>
                     <th className="workload-grid__name text-muted small">Табель</th>
@@ -594,21 +596,25 @@ export default function AdminGrid({ onSaved }) {
                 {rows.length === 0 && (
                   <tr>
                     <td className="text-muted small workload-grid__name" colSpan={dates.length + 1}>
-                      В этом периоде у сотрудника нет шифров. Добавьте шифр кнопкой ниже.
+                      В этом периоде у сотрудника нет пакетов. Добавьте пакет кнопкой ниже.
                     </td>
                   </tr>
                 )}
 
                 {rows.map((row) => (
-                  <tr key={row.mark_set_id}>
+                  <tr key={row.package_id}>
                     <th className="workload-grid__name workload-grid__name--set">
-                      <code className="workload-marka">{row.marka_full}</code>
+                      {/* Подпись «шифр (пакет)» в колонку целиком не всегда
+                          входит — полная по наведению. */}
+                      <code className="workload-marka" title={row.label}>
+                        {row.label}
+                      </code>
                       {row.is_added && (
                         <span className="badge text-bg-primary ms-2">добавлен</span>
                       )}
                       {row.status_name && (
                         <span
-                          className={`set-status-dot set-status--${row.status_id} ms-2`}
+                          className={`package-status-dot package-status package-status--${row.status_id} ms-2`}
                           title={`Статус: ${row.status_name}`}
                           role="img"
                           aria-label={`Статус: ${row.status_name}`}
@@ -632,8 +638,8 @@ export default function AdminGrid({ onSaved }) {
                       const effPlan = effectiveValue(base, pending, 'plan', iso);
 
                       const slots = ['plan', 'fact'].map((layer) => {
-                        const here = effectiveValue(base, pending, layer, iso) === row.mark_set_id;
-                        const wasHere = (base[layer].get(iso) ?? null) === row.mark_set_id;
+                        const here = effectiveValue(base, pending, layer, iso) === row.package_id;
+                        const wasHere = (base[layer].get(iso) ?? null) === row.package_id;
                         const allowed = day?.[`${layer}_allowed`];
                         // Очистить можно всегда; поставить — если день
                         // разрешает эту полосу.
@@ -642,7 +648,7 @@ export default function AdminGrid({ onSaved }) {
                         if (here) {
                           title = `${LAYER_NAMES[layer]}: снять`;
                         } else if (allowed) {
-                          title = `${LAYER_NAMES[layer]}: поставить ${row.marka_full}`;
+                          title = `${LAYER_NAMES[layer]}: поставить ${row.label}`;
                         } else {
                           title = REASON_HINTS[day?.[`${layer}_reason`]] || undefined;
                         }
@@ -652,11 +658,11 @@ export default function AdminGrid({ onSaved }) {
                             layer={layer}
                             here={here}
                             wasHere={wasHere}
-                            factOnPlan={effPlan === row.mark_set_id}
+                            factOnPlan={effPlan === row.package_id}
                             clickable={clickable}
                             rejected={rejectedKeys.has(cellKey(layer, iso)) && (here || wasHere)}
                             title={title}
-                            onClick={() => toggleSlot(layer, row.mark_set_id, iso)}
+                            onClick={() => toggleSlot(layer, row.package_id, iso)}
                           />
                         );
                       });
@@ -673,7 +679,7 @@ export default function AdminGrid({ onSaved }) {
             </table>
           </div>
 
-          {/* Под сеткой: добавить шифр, счётчик, отмена, сохранение. */}
+          {/* Под сеткой: добавить пакет, счётчик, отмена, сохранение. */}
           <div className="d-flex flex-wrap align-items-center gap-2 mt-3">
             {!searchOpen && (
               <button
@@ -681,7 +687,7 @@ export default function AdminGrid({ onSaved }) {
                 className="btn btn-sm btn-outline-primary"
                 onClick={() => setSearchOpen(true)}
               >
-                + добавить шифр
+                + добавить пакет
               </button>
             )}
             <div className="ms-auto d-flex align-items-center gap-2">
@@ -718,13 +724,13 @@ export default function AdminGrid({ onSaved }) {
           </div>
 
           {searchOpen && (
-            <MarkSetSearch
-              existingIds={new Set(rows.map((row) => row.mark_set_id))}
+            <PackageSearch
+              existingIds={new Set(rows.map((row) => row.package_id))}
               onAdd={handleAdd}
               onClose={() => setSearchOpen(false)}
-              search={searchAdminMarkSets}
+              search={searchAdminPackages}
               emptyText="Ничего не найдено."
-              hintText="Ищутся шифры любого статуса, включая выпущенные."
+              hintText="Ищутся пакеты любого статуса — и приостановленные, и из выпущенных комплектов."
             />
           )}
         </>
@@ -763,7 +769,7 @@ export default function AdminGrid({ onSaved }) {
                   maxLength={2000}
                   value={comment}
                   onChange={(event) => setComment(event.target.value)}
-                  placeholder="Например: отмечал не тот шифр 12–16.10, перенёс на ЭМ#1"
+                  placeholder="Например: отмечал не тот пакет 12–16.10, перенёс на «освещение»"
                   autoFocus
                 />
               </div>

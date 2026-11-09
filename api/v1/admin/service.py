@@ -4,9 +4,9 @@
 Здесь только работа с БД. Что можно сделать с ячейкой и что попадёт в
 журнал — в admin/rules.py (чистый модуль, проверяется в консоли).
 Снимок данных и запись плана переиспользуются из планирования: тот же
-AvailabilityContext по одному сотруднику и та же rebuild_plan, что
-пересчитывает work_plan, — администратор пишет план ТЕМ ЖЕ кодом, что
-начальник, а не своей копией.
+AvailabilityContext по одному сотруднику и та же add_plan_cells, что у
+начальника, — администратор пишет план ТЕМ ЖЕ кодом, а не своей копией.
+Значение ячейки — пакет работ.
 
 Четыре сценария:
   * list_employees      — список имён для выбора сотрудника;
@@ -55,15 +55,16 @@ from app.api.v1.fact.service import (
     SQLSTATE_DAY_CLOSED,
     SQLSTATE_UNIQUE,
 )
-from app.api.v1.planning.rules import AvailabilityContext
+from app.api.v1.planning.rules import AvailabilityContext, package_label
 from app.api.v1.planning.service import (
+    add_plan_cells,
     grid_rows_and_cells,
     load_context,
     load_package_status_names,
     resolve_employees_by_ids,
 )
 from app.models.admin import AdminChangeItem, AdminChangeset
-from app.models.composition import Department, ProjectMarkSet
+from app.models.composition import Department, ProjectMarkSet, WorkPackage
 from app.models.employee import Employee, EmployeeAssignment
 from app.models.planning import FactCalendarCell, PlanCalendarCell
 from app.models.user import User
@@ -77,7 +78,7 @@ MAX_GRID_DAYS: int = 120
 # Сколько последних правок показывать в журнале сотрудника.
 CHANGESETS_LIMIT: int = 50
 
-# 23503 — foreign_key_violation: шифр удалили между проверкой и записью.
+# 23503 — foreign_key_violation: пакет удалили между проверкой и записью.
 SQLSTATE_FOREIGN_KEY: str = "23503"
 
 
@@ -102,8 +103,8 @@ class EmptyCommentError(AdminError):
     """Комментарий пуст после обрезки пробелов."""
 
 
-class MarkSetsNotFoundError(AdminError):
-    """В правке есть шифры, которых нет в базе."""
+class PackagesNotFoundError(AdminError):
+    """В правке есть пакеты, которых нет в базе."""
 
     def __init__(self, missing_ids: list[int]) -> None:
         super().__init__(", ".join(str(i) for i in missing_ids))
@@ -130,7 +131,7 @@ class ConcurrentChangeError(AdminError):
 async def list_employees(db: AsyncSession, *, today: date) -> list[EmployeeOption]:
     """Все сотрудники с действующим на сегодня назначением, по ФИО.
 
-    Только имена и код подразделения — ни шифров, ни ячеек. Полный
+    Только имена и код подразделения — ни пакетов, ни ячеек. Полный
     список, без поиска на сервере: людей десятки–сотни, фильтр по вводу
     справляется на фронте.
 
@@ -238,7 +239,7 @@ async def load_admin_grid(
     date_to: date,
     today: date,
 ) -> AdminGrid:
-    """Сетка одного сотрудника: строки-шифры, флаги дней, клетки плана/факта.
+    """Сетка одного сотрудника: строки-пакеты, флаги дней, клетки плана/факта.
 
     Строки и клетки собирает планирование (grid_rows_and_cells) — у
     одного сотрудника они дают обе полосы. Слой дней — свой.
@@ -289,73 +290,74 @@ def _snapshot_old(
     ctx: AvailabilityContext,
     employee_id: int,
 ) -> dict[tuple[str, date], str]:
-    """Текстовые снимки ТЕКУЩИХ шифров ячеек — для «было» в журнале."""
+    """Подписи ТЕКУЩИХ пакетов ячеек — для «было» в журнале.
+
+    Подпись полная, «шифр (пакет)», а не один шифр: CHECK журнала
+    admin_change_items_is_change отвергает строку, где «было» и «стало»
+    совпадают, и перенос дня между пакетами одного шифра без названия
+    пакета выглядел бы как «ничего не изменилось».
+    """
     snapshot: dict[tuple[str, date], str] = {}
     for (emp_id, day), plan in ctx.plan_cells.items():
         if emp_id == employee_id:
-            snapshot[("plan", day)] = plan.marka_full
+            snapshot[("plan", day)] = plan.label
     for (emp_id, day), fact in ctx.fact_cells.items():
         if emp_id == employee_id:
-            snapshot[("fact", day)] = fact.marka_full
+            snapshot[("fact", day)] = fact.label
     return snapshot
 
 
-async def _load_markas(db: AsyncSession, mark_set_ids: set[int]) -> dict[int, str]:
-    """Шифры по id: id → marka_full. Отсутствующие в базе в словарь не входят."""
-    if not mark_set_ids:
+async def _load_labels(db: AsyncSession, package_ids: set[int]) -> dict[int, str]:
+    """Подписи пакетов по id. Отсутствующие в базе в словарь не входят."""
+    if not package_ids:
         return {}
     rows = await db.execute(
-        select(ProjectMarkSet.id, ProjectMarkSet.marka_full).where(
-            ProjectMarkSet.id.in_(mark_set_ids)
-        )
+        select(WorkPackage.id, ProjectMarkSet.marka_full, WorkPackage.name)
+        .join(ProjectMarkSet, ProjectMarkSet.id == WorkPackage.mark_set_id)
+        .where(WorkPackage.id.in_(package_ids))
     )
-    return {mark_set_id: marka for mark_set_id, marka in rows.all()}
+    return {
+        package_id: package_label(marka_full, name)
+        for package_id, marka_full, name in rows.all()
+    }
 
 
 async def _write_plan(
     db: AsyncSession,
-    ctx: AvailabilityContext,
     employee_id: int,
     changes: list[CellChange],
 ) -> None:
     """Запись плановых изменений — тем же порядком, что apply_changes.
 
-    1. Сначала ВСЕ удаления по всем затронутым планам: иначе перенос дня
-       с шифра на шифр упрётся в unique_plan_cell.
-    2. Затем rebuild_plan по каждому затронутому плану: создаёт шапку,
-       если плана не было, вставляет ячейки и пересчитывает начало,
-       конец и число дней; пустой план удаляет.
+    1. Сначала ВСЕ удаления: иначе перенос дня с пакета на пакет упрётся
+       в unique_plan_cell. Удаляется по тройке «пакет + сотрудник +
+       даты» — ячейка однозначна.
+    2. Затем вставки — add_plan_cells планирования, тем же кодом, каким
+       план пишет начальник. Шапки плана нет, пересчитывать нечего.
     """
     removed: dict[int, list[date]] = {}
     added: dict[int, list[date]] = {}
     for change in changes:
-        if change.old_mark_set_id is not None:
-            removed.setdefault(change.old_mark_set_id, []).append(change.work_date)
-        if change.new_mark_set_id is not None:
-            added.setdefault(change.new_mark_set_id, []).append(change.work_date)
+        if change.old_package_id is not None:
+            removed.setdefault(change.old_package_id, []).append(change.work_date)
+        if change.new_package_id is not None:
+            added.setdefault(change.new_package_id, []).append(change.work_date)
 
-    for mark_set_id, work_dates in removed.items():
-        plan = ctx.work_plans.get((mark_set_id, employee_id))
-        if plan is None:
-            # Ячейка была в снимке, значит, план был. Нет — данные
-            # разошлись; вставка ниже упрётся в unique_plan_cell, и
-            # правка откатится как параллельное изменение.
-            continue
+    for package_id, work_dates in removed.items():
         await db.execute(
             delete(PlanCalendarCell).where(
-                PlanCalendarCell.work_plan_id == plan.id,
+                PlanCalendarCell.package_id == package_id,
+                PlanCalendarCell.employee_id == employee_id,
                 PlanCalendarCell.work_date.in_(work_dates),
             )
         )
 
-    for mark_set_id in set(removed) | set(added):
-        plan = ctx.work_plans.get((mark_set_id, employee_id))
-        await rebuild_plan(
+    for package_id, work_dates in added.items():
+        await add_plan_cells(
             db,
-            mark_set_id=mark_set_id,
+            package_id=package_id,
             employee_id=employee_id,
-            plan_id=plan.id if plan else None,
-            added=added.get(mark_set_id, []),
+            work_dates=work_dates,
         )
 
 
@@ -375,21 +377,21 @@ async def _write_fact(
             FactCalendarCell.employee_id == employee_id,
             FactCalendarCell.work_date == change.work_date,
         )
-        if change.old_mark_set_id is None:
+        if change.old_package_id is None:
             await db.execute(
                 insert(FactCalendarCell).values(
-                    mark_set_id=change.new_mark_set_id,
+                    package_id=change.new_package_id,
                     employee_id=employee_id,
                     work_date=change.work_date,
                 )
             )
-        elif change.new_mark_set_id is None:
+        elif change.new_package_id is None:
             await db.execute(delete(FactCalendarCell).where(*where))
         else:
             await db.execute(
                 update(FactCalendarCell)
                 .where(*where)
-                .values(mark_set_id=change.new_mark_set_id)
+                .values(package_id=change.new_package_id)
             )
 
 
@@ -412,16 +414,16 @@ async def apply_admin_changes(
     2. Снимок базы → diff (compute_diff). «Было» берётся из базы, а не
        из запроса: подменить его браузер не может.
     3. Пустой diff — ничего не пишем, правки в журнале нет.
-    4. Проверка: шифры существуют, каждое изменение не нарушает
+    4. Проверка: пакеты существуют, каждое изменение не нарушает
        целостность. Хоть один отказ — не пишем ничего.
-    5. План (rebuild_plan), факт, журнал — и commit.
+    5. План (add_plan_cells), факт, журнал — и commit.
     """
     text = comment.strip()
     if not text:
         raise EmptyCommentError()
 
     desired = [
-        DesiredCell(layer=c.layer, work_date=c.work_date, mark_set_id=c.mark_set_id)
+        DesiredCell(layer=c.layer, work_date=c.work_date, package_id=c.package_id)
         for c in cells
     ]
     if not desired:
@@ -441,12 +443,12 @@ async def apply_admin_changes(
         await db.rollback()  # отпускает блокировку
         return AdminApplyResult(changeset_id=None, applied=0)
 
-    new_ids = {c.new_mark_set_id for c in diff if c.new_mark_set_id is not None}
-    new_markas = await _load_markas(db, new_ids)
-    missing = sorted(new_ids - set(new_markas))
+    new_ids = {c.new_package_id for c in diff if c.new_package_id is not None}
+    new_labels = await _load_labels(db, new_ids)
+    missing = sorted(new_ids - set(new_labels))
     if missing:
         await db.rollback()
-        raise MarkSetsNotFoundError(missing)
+        raise PackagesNotFoundError(missing)
 
     rejections = [
         rejection
@@ -458,12 +460,12 @@ async def apply_admin_changes(
         await db.rollback()
         raise AdminRejectedError(rejections)
 
-    old_markas = _snapshot_old(ctx, employee_id)
+    old_labels = _snapshot_old(ctx, employee_id)
     plan_changes = [c for c in diff if c.layer == "plan"]
     fact_changes = [c for c in diff if c.layer == "fact"]
 
     try:
-        await _write_plan(db, ctx, employee_id, plan_changes)
+        await _write_plan(db, employee_id, plan_changes)
         await _write_fact(db, employee_id, fact_changes)
 
         changeset_id = (
@@ -481,12 +483,14 @@ async def apply_admin_changes(
                     "changeset_id": changeset_id,
                     "layer": change.layer,
                     "work_date": change.work_date,
-                    "old_mark_set_id": change.old_mark_set_id,
-                    "new_mark_set_id": change.new_mark_set_id,
-                    "old_marka": old_markas.get((change.layer, change.work_date)),
+                    "old_package_id": change.old_package_id,
+                    "new_package_id": change.new_package_id,
+                    # Колонки снимков называются по-старому (old_marka),
+                    # лежит в них подпись «шифр (пакет)».
+                    "old_marka": old_labels.get((change.layer, change.work_date)),
                     "new_marka": (
-                        new_markas[change.new_mark_set_id]
-                        if change.new_mark_set_id is not None
+                        new_labels[change.new_package_id]
+                        if change.new_package_id is not None
                         else None
                     ),
                 }
@@ -500,7 +504,7 @@ async def apply_admin_changes(
         await db.rollback()
         code = _sqlstate(exc)
         if code in (SQLSTATE_DAY_CLOSED, SQLSTATE_UNIQUE, SQLSTATE_FOREIGN_KEY):
-            # Неявку внесли, шифр удалили или ячейку заняли мимо
+            # Неявку внесли, пакет удалили или ячейку заняли мимо
             # блокировки — картина устарела, сетку нужно перечитать.
             logger.info("Отказ БД при правке администратора: %s", code)
             raise ConcurrentChangeError(code) from exc
@@ -569,8 +573,10 @@ async def list_changesets(
                 # колонке только 'plan' и 'fact'.
                 layer=cast(Layer, layer),
                 work_date=work_date,
-                old_marka=old_marka,
-                new_marka=new_marka,
+                # Колонки базы — old_marka / new_marka, поля ответа —
+                # old_label / new_label: в снимке лежит подпись пакета.
+                old_label=old_marka,
+                new_label=new_marka,
             )
         )
 

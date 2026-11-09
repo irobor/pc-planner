@@ -23,7 +23,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { fetchFactWindow, postMark, postPackageStatus } from '../api/fact';
-import MarkSetSearch from './MarkSetSearch';
+import PackageSearch from './PackageSearch';
 
 // Родительный падеж — для строки «Понедельник, 12 октября».
 const MONTHS_GENITIVE = [
@@ -626,7 +626,7 @@ export default function FactMatrix() {
       </div>
 
       {searchOpen && (
-        <MarkSetSearch
+        <PackageSearch
           existingIds={view.ids}
           onAdd={handleAdd}
           onClose={() => setSearchOpen(false)}

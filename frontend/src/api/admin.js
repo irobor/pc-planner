@@ -51,21 +51,25 @@ export function fetchAdminGrid(employeeId, dateFrom, dateTo) {
 }
 
 /**
- * Поиск шифра ЛЮБОГО статуса (включая выпущенные) для «+ добавить шифр».
+ * Поиск пакета ЛЮБОГО статуса (включая приостановленные и пакеты выпущенных
+ * комплектов) для «+ добавить пакет» — по шифру или названию пакета.
  *
  * signal — от AbortController: при быстром наборе устаревший запрос
  * отменяется, иначе медленный ответ затёр бы свежую выдачу. Отменённый
  * запрос бросает AbortError — вызывающий код его игнорирует.
  */
-export function searchAdminMarkSets(query, signal) {
-  return getJson('/mark-sets', { q: query }, signal);
+export function searchAdminPackages(query, signal) {
+  return getJson('/packages', { q: query }, signal);
 }
 
 /**
  * Сохраняет пачку правок одного сотрудника.
  *
  * cells — ЖЕЛАЕМОЕ ИТОГОВОЕ СОСТОЯНИЕ затронутых ячеек:
- *   [{ layer: 'plan' | 'fact', work_date: 'ГГГГ-ММ-ДД', mark_set_id | null }]
+ *   [{ layer: 'plan' | 'fact', work_date: 'ГГГГ-ММ-ДД', package_id | null }]
+ *
+ * package_id передаётся ВСЕГДА, для очистки — явным null: сервер
+ * требует поле, чтобы запрос без него не стёр ячейку молча.
  * null — очистить ячейку. «Было» сервер берёт из базы сам.
  *
  * comment — обязательный комментарий к правке (как сообщение коммита).

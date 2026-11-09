@@ -1,4 +1,4 @@
-// app/frontend/src/components/MarkSetSearch.jsx
+// app/frontend/src/components/PackageSearch.jsx
 // Панель «+ добавить пакет»: поиск пакета, которого нет в матрице.
 //
 // Случай из жизни: инженер работал над чужим пакетом (подмена, помощь
@@ -43,7 +43,7 @@ const DEBOUNCE_MS = 300;
  *   emptyText   — подпись при пустой выдаче;
  *   hintText    — подсказка под списком.
  */
-export default function MarkSetSearch({
+export default function PackageSearch({
   existingIds,
   onAdd,
   onClose,

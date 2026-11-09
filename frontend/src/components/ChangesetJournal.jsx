@@ -74,7 +74,7 @@ function formatDays(dates) {
 function groupItems(items) {
   const groups = new Map();
   for (const item of items) {
-    const key = `${item.layer}|${item.old_marka ?? ''}|${item.new_marka ?? ''}`;
+    const key = `${item.layer}|${item.old_label ?? ''}|${item.new_label ?? ''}`;
     if (!groups.has(key)) {
       groups.set(key, { ...item, dates: [] });
     }
@@ -83,9 +83,9 @@ function groupItems(items) {
   return [...groups.values()];
 }
 
-/** Шифр или «пусто» — пустая ячейка в diff должна быть видна словом. */
-const markaOrEmpty = (marka) =>
-  marka ? <code>{marka}</code> : <span className="text-muted">пусто</span>;
+/** Пакет или «пусто» — пустая ячейка в diff должна быть видна словом. */
+const labelOrEmpty = (label) =>
+  label ? <code>{label}</code> : <span className="text-muted">пусто</span>;
 
 /**
  * Props:
@@ -172,11 +172,11 @@ export default function ChangesetJournal({ employeeId, reloadKey }) {
                 {isOpen && (
                   <ul className="list-unstyled small mt-2 mb-0 ms-4">
                     {groupItems(cs.items).map((group) => (
-                      <li key={`${group.layer}|${group.dates[0]}|${group.new_marka}`}>
+                      <li key={`${group.layer}|${group.dates[0]}|${group.new_label}`}>
                         <span className="text-muted">
                           {LAYER_NAMES[group.layer]} {formatDays(group.dates)}:
                         </span>{' '}
-                        {markaOrEmpty(group.old_marka)} → {markaOrEmpty(group.new_marka)}
+                        {labelOrEmpty(group.old_label)} → {labelOrEmpty(group.new_label)}
                       </li>
                     ))}
                   </ul>

@@ -3,7 +3,7 @@
 
     GET  /employees   — список имён для выбора сотрудника
     GET  /grid        — сетка одного сотрудника на интервал
-    GET  /mark-sets   — поиск шифра (любой статус) для «+ добавить шифр»
+    GET  /packages    — поиск пакета (любой статус) для «+ добавить пакет»
     POST /changes     — пачка правок плана и факта + комментарий
     GET  /changesets  — журнал правок сотрудника
 
@@ -43,7 +43,7 @@ from app.api.v1.admin.service import (
     EmployeeNotFoundError,
     EmptyCommentError,
     InvalidIntervalError,
-    MarkSetsNotFoundError,
+    PackagesNotFoundError,
     apply_admin_changes,
     list_changesets,
     list_employees,
@@ -143,11 +143,12 @@ async def read_grid(
     date_from: Annotated[date, Query(description="Начало интервала")],
     date_to: Annotated[date, Query(description="Конец интервала")],
 ) -> AdminGrid:
-    """Строки-шифры, клетки плана и факта, флаги дней.
+    """Строки-пакеты, клетки плана и факта, флаги дней.
 
     days[].plan_allowed / fact_allowed — можно ли ПОСТАВИТЬ значение в
     полосу. Очистить ячейку можно всегда. Процессные ограничения (окно
-    отметки, блокировка плана фактом, статус шифра) не действуют.
+    отметки, блокировка плана фактом, статус пакета, выпуск комплекта)
+    не действуют.
 
     Коды ошибок:
       403 — нет права plan:override или fact:override;
@@ -175,12 +176,12 @@ async def read_grid(
 
 
 @router.get(
-    "/mark-sets",
+    "/packages",
     response_model=list[PackageFound],
     status_code=status.HTTP_200_OK,
     summary="Поиск пакета любого статуса",
 )
-async def find_mark_sets(
+async def find_packages(
     db: Annotated[AsyncSession, Depends(get_db)],
     _admin: Annotated[User, Depends(require_data_admin)],
     q: Annotated[
@@ -188,7 +189,7 @@ async def find_mark_sets(
         Query(
             min_length=SEARCH_MIN_LENGTH,
             max_length=100,
-            description="Фрагмент шифра",
+            description="Фрагмент шифра или названия пакета",
         ),
     ],
 ) -> list[PackageFound]:
@@ -210,7 +211,7 @@ async def find_mark_sets(
     except SearchTooShortError:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Введите не меньше {SEARCH_MIN_LENGTH} символов шифра.",
+            detail=f"Введите не меньше {SEARCH_MIN_LENGTH} символов.",
         )
 
 
@@ -228,7 +229,7 @@ async def write_changes(
     """Применяет правки одного сотрудника одной транзакцией и пишет журнал.
 
     cells — ЖЕЛАЕМОЕ ИТОГОВОЕ СОСТОЯНИЕ затронутых ячеек
-    (mark_set_id = null — очистить). Diff сервер считает сам, сравнивая
+    (package_id = null — очистить, явно). Diff сервер считает сам, сравнивая
     со снимком базы; ячейки, совпавшие с базой, в журнал не попадают.
     Если не изменилось ничего, changeset_id = null.
 
@@ -236,7 +237,7 @@ async def write_changes(
 
     Коды ошибок:
       403 — нет прав;
-      404 — сотрудник или шифр не найден;
+      404 — сотрудник или пакет не найден;
       409 — изменения нарушают целостность (тело: message и rejected
             по каждой ячейке) или данные изменились параллельно;
       422 — пустой комментарий или две операции на одну ячейку.
@@ -273,12 +274,11 @@ async def write_changes(
             detail="Сотрудник не найден.",
         )
 
-    except MarkSetsNotFoundError:
+    except PackagesNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Шифр не найден — возможно, его удалили. Обновите страницу.",
+            detail="Пакет не найден — возможно, его удалили. Обновите страницу.",
         )
-
     except AdminRejectedError as exc:
         # Формат как у планирования ({message, rejected}): parseResponse
         # на фронте разбирает оба одинаково.

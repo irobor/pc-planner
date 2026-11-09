@@ -9,7 +9,7 @@
 
 Правка присылается как ЖЕЛАЕМОЕ ИТОГОВОЕ СОСТОЯНИЕ затронутых ячеек
 (AdminCellIn), а не «добавь/убери»: diff сервер считает сам, сравнивая
-со снимком базы.
+со снимком базы. Значение ячейки — пакет работ.
 """
 
 from datetime import date, datetime
@@ -101,11 +101,15 @@ class AdminGrid(BaseModel):
 
 
 class AdminCellIn(BaseModel):
-    """Одна ячейка: какой она должна стать. mark_set_id = None — очистить."""
+    """Одна ячейка: какой она должна стать. package_id = null — очистить."""
 
     layer: Literal["plan", "fact"]
     work_date: date
-    mark_set_id: Optional[int] = Field(default=None, gt=0)
+    # Обязательное поле, хотя null допустим: очистка должна быть ЯВНОЙ.
+    # Со значением по умолчанию запрос без поля — например, от старой
+    # сборки экрана с прежним именем поля — молча стёр бы ячейку, и
+    # правка ушла бы в журнал как законная очистка.
+    package_id: Optional[int] = Field(gt=0)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -156,13 +160,18 @@ class AdminApplyResult(BaseModel):
 
 
 class ChangeItemOut(BaseModel):
-    """Строка diff: полоса, день, было → стало (снимки шифров)."""
+    """Строка diff: полоса, день, было → стало.
+
+    Подписи — текстовые снимки «шифр (пакет)» на момент правки: запись
+    читается, даже если пакет потом удалят. В базе они лежат в колонках
+    old_marka / new_marka — имена колонок прежние, смысл шире.
+    """
 
     layer: Literal["plan", "fact"]
     work_date: date
     # None — ячейка была пустой / стала пустой.
-    old_marka: Optional[str] = None
-    new_marka: Optional[str] = None
+    old_label: Optional[str] = None
+    new_label: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

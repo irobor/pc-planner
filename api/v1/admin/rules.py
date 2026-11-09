@@ -9,9 +9,11 @@ planning/rules.py и fact/rules.py: ни БД, ни async, ни Pydantic.
 
 Чем правила администратора отличаются от правил начальника и инженера:
 проверяется ТОЛЬКО целостность данных. Процессные ограничения — окно
-отметки, блокировка плана фактом, статус шифра, «только исполнитель»,
-прошедшие даты — не проверяются вовсе: на практике ошибок много, и
-исправлять их должно быть можно без SQL.
+отметки, блокировка плана фактом, статус пакета, выпуск комплекта,
+«только исполнитель», прошедшие даты — не проверяются вовсе: на
+практике ошибок много, и исправлять их должно быть можно без SQL.
+
+Значение ячейки — пакет работ, как у начальника и инженера.
 
 Целостность (для значения, а не для очистки):
 
@@ -58,12 +60,12 @@ CellKey = tuple[Layer, date]
 class DesiredCell:
     """Одна ячейка из запроса: какой она должна стать.
 
-    mark_set_id = None — ячейку очистить.
+    package_id = None — ячейку очистить.
     """
 
     layer: Layer
     work_date: date
-    mark_set_id: Optional[int]
+    package_id: Optional[int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,8 +79,8 @@ class CellChange:
 
     layer: Layer
     work_date: date
-    old_mark_set_id: Optional[int]
-    new_mark_set_id: Optional[int]
+    old_package_id: Optional[int]
+    new_package_id: Optional[int]
 
 
 class DuplicateCellError(ValueError):
@@ -142,10 +144,10 @@ def current_cells(
     cells: dict[CellKey, int] = {}
     for (emp_id, day), plan in ctx.plan_cells.items():
         if emp_id == employee_id:
-            cells[("plan", day)] = plan.mark_set_id
+            cells[("plan", day)] = plan.package_id
     for (emp_id, day), fact in ctx.fact_cells.items():
         if emp_id == employee_id:
-            cells[("fact", day)] = fact.mark_set_id
+            cells[("fact", day)] = fact.package_id
     return cells
 
 
@@ -171,14 +173,14 @@ def compute_diff(
         seen.add(key)
 
         old = current.get(key)
-        if old == cell.mark_set_id:
+        if old == cell.package_id:
             continue
         changes.append(
             CellChange(
                 layer=cell.layer,
                 work_date=cell.work_date,
-                old_mark_set_id=old,
-                new_mark_set_id=cell.mark_set_id,
+                old_package_id=old,
+                new_package_id=cell.package_id,
             )
         )
 
@@ -250,6 +252,6 @@ def admin_cell_rejection(
     Очистка (new = None) разрешена всегда — см. докстринг модуля.
     Для значения — value_rejection.
     """
-    if change.new_mark_set_id is None:
+    if change.new_package_id is None:
         return None
     return value_rejection(ctx, employee_id, change.layer, change.work_date, today)
