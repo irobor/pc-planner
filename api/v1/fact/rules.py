@@ -98,7 +98,7 @@ _BASE_STATES: dict[DayState, FactDayState] = {
 
 
 class MarkAction(str, Enum):
-    """Что делать с кликом инженера по 	клетке (пакет, день)."""
+    """Что делать с кликом инженера по клетке (пакет, день)."""
 
     # День не открыт для отметки.
     REJECT = "reject"

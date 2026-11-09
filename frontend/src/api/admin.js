@@ -25,7 +25,7 @@ async function getJson(path, params = {}, signal = undefined) {
 /**
  * Список сотрудников для выбора: [{ id, full_name, department_code }].
  *
- * Только имена — ни шифров, ни ячеек. Полный список: фильтр по вводу
+ * Только имена — ни пакетов, ни ячеек. Полный список: фильтр по вводу
  * делается на клиенте.
  */
 export function fetchEmployees() {
