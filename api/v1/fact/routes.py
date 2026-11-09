@@ -1,11 +1,12 @@
 # app/api/v1/fact/routes.py
 """JSON-API отметки факта инженером — раздел «Мой факт» (/fact).
 
-    GET  /window     — лента инженера от якорного дня (чтение)
-    GET  /mark-sets  — поиск шифра для «+ добавить шифр» (чтение)
-    POST /mark       — отметка одного дня (запись)
+    GET  /window                — лента инженера от якорного дня (чтение)
+    GET  /packages              — поиск пакета для «+ добавить пакет» (чтение)
+    POST /mark                  — отметка одного дня (запись)
+    POST /packages/{id}/status  — статус своего пакета (запись)
 
-Все три требуют право fact:own И кадровую карточку. Второе условие
+Все четыре требуют право fact:own И кадровую карточку. Второе условие
 нужно из-за обхода прав администратора: user.can() пропускает роль
 admin куда угодно, а у служебной учётки sys_admin записи в employees
 нет — без проверки карточки сервис получил бы инженера None.
@@ -25,18 +26,28 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.fact.rules import FactDayState, FactVerdict
-from app.api.v1.fact.schemas import FactWindow, MarkIn, MarkResult, MarkSetFound
+from app.api.v1.fact.schemas import (
+    FactWindow,
+    MarkIn,
+    MarkResult,
+    PackageFound,
+    StatusIn,
+    StatusResult,
+)
 from app.api.v1.fact.service import (
     SEARCH_MIN_LENGTH,
     ConcurrentChangeError,
     DayRejectedError,
     InvalidWindowError,
-    MarkSetClosedError,
-    MarkSetNotFoundError,
+    NotExecutorError,
+    PackageClosedError,
+    PackageNotFoundError,
     SearchTooShortError,
+    UnknownStatusError,
     load_fact_window,
-    search_mark_sets,
+    search_packages,
     set_mark,
+    set_package_status,
 )
 from app.core.dependencies import PermissionChecker, get_db
 from app.core.scope import get_user_department_id
@@ -123,9 +134,8 @@ async def read_window(
 ) -> FactWindow:
     """Отдаёт ленту инженера: 14 дней до якоря и 28 после.
 
-    Строки — шифры, где у инженера в пределах ленты есть план или факт,
-    либо он исполнитель шифра в статусе «В плане», «В работе» или
-    «На проверке».
+    Строки — пакеты, где у инженера в пределах ленты есть план или факт,
+    либо он исполнитель пакета в любом статусе, кроме «Приостановлен».
 
     Кликабельны только дни со state = open: сегодня и предыдущий
     рабочий день, если в них нет неявки. Окно отметки считается от
@@ -159,12 +169,12 @@ async def read_window(
 
 
 @router.get(
-    "/mark-sets",
-    response_model=list[MarkSetFound],
+    "/packages",
+    response_model=list[PackageFound],
     status_code=status.HTTP_200_OK,
-    summary="Поиск шифра для добавления в матрицу",
+    summary="Поиск пакета для добавления в ленту",
 )
-async def find_mark_sets(
+async def find_packages(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_fact)],
     # employee_id в теле не нужен, но зависимость обязательна: она
@@ -175,15 +185,17 @@ async def find_mark_sets(
         Query(
             min_length=SEARCH_MIN_LENGTH,
             max_length=100,
-            description="Фрагмент шифра",
+            description="Фрагмент шифра или названия пакета",
         ),
     ],
-) -> list[MarkSetFound]:
-    """Ищет шифры по всей организации, ближние к инженеру — первыми.
+) -> list[PackageFound]:
+    """Ищет пакеты по всей организации, ближние к инженеру — первыми.
 
-    Порядок выдачи: шифры его бюро, затем его отдела, затем остальные;
-    внутри группы — по алфавиту. Не больше 20 результатов. Выпущенные
-    шифры не ищутся: факт по ним не ставится.
+    Ищется по подписи «шифр (пакет)»: и по шифру, и по названию пакета.
+    Порядок выдачи: пакеты его бюро, затем его отдела, затем остальные;
+    внутри группы — по алфавиту. Не больше 20 результатов. Пакеты, по
+    которым факт не ставится (приостановленные, из выпущенных
+    комплектов), не ищутся.
 
     Коды ошибок:
       403 — нет права fact:own или нет кадровой карточки;
@@ -191,13 +203,13 @@ async def find_mark_sets(
     """
     department_id = await get_user_department_id(db, current_user)
     try:
-        return await search_mark_sets(db, department_id=department_id, query=q)
+        return await search_packages(db, department_id=department_id, query=q)
     except SearchTooShortError:
         # Query(min_length) считает пробелы, сервис — нет: «  053 »
         # пройдёт первую проверку и остановится здесь.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Введите не меньше {SEARCH_MIN_LENGTH} символов шифра.",
+            detail=f"Введите не меньше {SEARCH_MIN_LENGTH} символов.",
         )
 
 
@@ -212,9 +224,9 @@ async def write_mark(
     db: Annotated[AsyncSession, Depends(get_db)],
     employee_id: Annotated[int, Depends(get_fact_employee_id)],
 ) -> MarkResult:
-    """Отмечает, над каким шифром инженер работал в этот день.
+    """Отмечает, над каким пакетом инженер работал в этот день.
 
-    Одна отметка в день. Клик по другому шифру того же дня ПЕРЕНОСИТ
+    Одна отметка в день. Клик по другому пакету того же дня ПЕРЕНОСИТ
     отметку, клик по своей же отметке ничего не меняет (action = noop).
     Снять отметку нельзя: пустой рабочий день — это неявка, её
     оформляет табельщица.
@@ -226,29 +238,37 @@ async def write_mark(
 
     Коды ошибок:
       403 — нет права fact:own или нет кадровой карточки;
-      404 — шифр не существует;
-      409 — день закрыт (выходной, неявка, будущее, истёк срок),
-            шифр выпущен или данные изменились параллельно.
+      404 — пакет не существует;
+      409 — день закрыт (выходной, неявка, будущее, истёк срок), пакет
+            приостановлен, комплект выпущен или данные изменились
+            параллельно.
     """
     try:
         return await set_mark(
             db,
             employee_id=employee_id,
-            mark_set_id=payload.mark_set_id,
+            package_id=payload.package_id,
             work_date=payload.work_date,
             today=date.today(),
         )
 
-    except MarkSetNotFoundError:
+    except PackageNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Шифр не найден — обновите страницу.",
+            detail="Пакет не найден — обновите страницу.",
         )
 
-    except MarkSetClosedError as exc:
+    except PackageClosedError as exc:
+        # Выпуск важнее статуса: выпущенный комплект закрыт для факта
+        # при любом статусе пакета, и сказать надо именно это. Статус —
+        # в кавычках, как есть: так не нужно согласовывать падеж.
+        if exc.released:
+            reason = "комплект выпущен"
+        else:
+            reason = f"пакет в статусе «{exc.status_name}»"
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Шифр {exc.marka_full} выпущен, отметка по нему невозможна.",
+            detail=f"{exc.label}: {reason} — отметка невозможна.",
         )
 
     except DayRejectedError as exc:
@@ -264,4 +284,57 @@ async def write_mark(
                 f"{exc.work_date.strftime(DATE_FORMAT)}: данные изменились "
                 "— обновите страницу."
             ),
+        )
+
+
+@router.post(
+    "/packages/{package_id}/status",
+    response_model=StatusResult,
+    status_code=status.HTTP_200_OK,
+    summary="Смена статуса своего пакета исполнителем",
+)
+async def write_package_status(
+    package_id: int,
+    payload: StatusIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    employee_id: Annotated[int, Depends(get_fact_employee_id)],
+) -> StatusResult:
+    """Меняет статус пакета — только его текущему исполнителю.
+
+    Статус пакета ставит исполнитель, включая стадии согласования. Тот же
+    статус может поменять начальник в «Бюро». Порядок статусов свободный.
+
+    Ответ — строка пакета целиком: вместе со статусом может измениться
+    допуск факта («Приостановлен» закрывает клетки строки).
+
+    Коды ошибок:
+      403 — нет права fact:own, нет кадровой карточки или инженер не
+            исполнитель пакета;
+      404 — пакет не существует;
+      422 — неизвестный статус.
+    """
+    try:
+        return await set_package_status(
+            db,
+            employee_id=employee_id,
+            package_id=package_id,
+            status_id=payload.status_id,
+        )
+
+    except PackageNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Пакет не найден — обновите страницу.",
+        )
+
+    except NotExecutorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"{exc}: статус меняет только исполнитель пакета.",
+        )
+
+    except UnknownStatusError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Неизвестный статус — обновите страницу.",
         )

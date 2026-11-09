@@ -1,20 +1,22 @@
 // app/frontend/src/components/MarkSetSearch.jsx
-// Панель «+ добавить шифр»: поиск шифра, которого нет в матрице.
+// Панель «+ добавить пакет»: поиск пакета, которого нет в матрице.
 //
-// Случай из жизни: инженер работал над чужим комплектом (подмена,
-// помощь соседнему бюро), а в его матрице такой строки нет. Найти шифр
-// должно быть проще, чем отметить «ближайший свой» — иначе факт соврёт.
+// Случай из жизни: инженер работал над чужим пакетом (подмена, помощь
+// соседнему бюро), а в его матрице такой строки нет. Найти пакет должно
+// быть проще, чем отметить «ближайший свой» — иначе факт соврёт.
 //
-// Панель только НАХОДИТ шифр и отдаёт его наружу через onAdd. Строка,
+// Ищется по подписи «шифр (пакет)» — и по шифру, и по названию пакета.
+// Панель только НАХОДИТ пакет и отдаёт его наружу через onAdd. Строка,
 // добавленная так, живёт в браузере до первой отметки: сервер о ней не
 // знает, и хранить её незачем — пустая добавленная строка ничего не
 // значит. После отметки она приходит с сервера как обычная.
 //
-// Порядок выдачи, предел 20 и запрет выпущенных шифров решает сервер.
+// Порядок выдачи, предел 20 и что не ищется (приостановленные пакеты,
+// выпущенные комплекты) решает сервер.
 // Здесь — только удобство набора: задержка, отмена устаревших запросов.
 import React, { useEffect, useRef, useState } from 'react';
 
-import { searchMarkSets } from '../api/fact';
+import { searchPackages } from '../api/fact';
 
 // Минимальная длина строки поиска. Дублирует SEARCH_MIN_LENGTH сервиса
 // ради удобства: короткую строку незачем отправлять, сервер ответил бы
@@ -27,15 +29,16 @@ const MIN_LENGTH = 5;
 const DEBOUNCE_MS = 300;
 
 /**
- * Панель поиска шифра.
+ * Панель поиска пакета.
  *
  * Props:
- *   existingIds — Set id шифров, уже стоящих в матрице: для них вместо
+ *   existingIds — Set id пакетов, уже стоящих в матрице: для них вместо
  *                 кнопки «Добавить» пишем «Уже в матрице»;
- *   onAdd(item) — выбран шифр (элемент выдачи MarkSetFound);
+ *   onAdd(item) — выбран пакет (элемент выдачи PackageFound);
  *   onClose()   — панель закрыть (кнопка «×» или Esc);
- *   search      — функция поиска (query, signal) → Promise<MarkSetFound[]>.
- *                 По умолчанию — поиск инженера (без выпущенных шифров);
+ *   search      — функция поиска (query, signal) → Promise<PackageFound[]>.
+ *                 По умолчанию — поиск инженера (только пакеты, где
+ *                 можно отметить факт);
  *                 экран администратора передаёт свой (любой статус);
  *   emptyText   — подпись при пустой выдаче;
  *   hintText    — подсказка под списком.
@@ -44,9 +47,9 @@ export default function MarkSetSearch({
   existingIds,
   onAdd,
   onClose,
-  search = searchMarkSets,
-  emptyText = 'Ничего не найдено. Выпущенные шифры не показываются.',
-  hintText = 'Сначала шифры вашего бюро, затем отдела, затем остальной организации.',
+  search = searchPackages,
+  emptyText = 'Ничего не найдено. Приостановленные пакеты и пакеты выпущенных комплектов не показываются.',
+  hintText = 'Сначала пакеты вашего бюро, затем отдела, затем остальной организации.',
 }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
@@ -57,7 +60,7 @@ export default function MarkSetSearch({
 
   const inputRef = useRef(null);
 
-  // Фокус в поле сразу при открытии: инженер нажал «+ добавить шифр»
+  // Фокус в поле сразу при открытии: инженер нажал «+ добавить пакет»
   // ради того, чтобы печатать, лишний клик в поле ни к чему.
   useEffect(() => {
     inputRef.current?.focus();
@@ -117,7 +120,7 @@ export default function MarkSetSearch({
       <div className="card-body">
         <div className="d-flex align-items-center justify-content-between mb-2">
           <label htmlFor="fact-search-input" className="form-label mb-0 text-muted">
-            Шифр, которого нет в матрице
+            Пакет, которого нет в матрице
           </label>
           <button
             type="button"
@@ -142,7 +145,7 @@ export default function MarkSetSearch({
         {/* Подсказка под полем меняется по состоянию: так пользователь
             всегда понимает, почему список пуст. */}
         <div className="form-text">
-          {tooShort && `Введите не меньше ${MIN_LENGTH} символов шифра.`}
+          {tooShort && `Введите не меньше ${MIN_LENGTH} символов.`}
           {!tooShort && status === 'loading' && 'Поиск…'}
           {!tooShort && status === 'done' && results.length === 0 && emptyText}
           {!tooShort && status === 'error' && (
@@ -161,7 +164,7 @@ export default function MarkSetSearch({
                 >
                   <div className="text-truncate">
                     <span className="font-monospace fw-semibold">
-                      {item.marka_full}
+                      {item.label}
                     </span>
                     <span className="text-muted small ms-2">
                       {item.department_code} · {item.department_name}

@@ -1,7 +1,7 @@
 // app/frontend/src/components/FactMatrix.jsx
 // Лента факта инженера — раздел «Мой факт» (/fact).
 //
-// Строки — шифры, столбцы — дни ленты: 14 дней до якорного дня и 28
+// Строки — пакеты, столбцы — дни ленты: 14 дней до якорного дня и 28
 // после (по умолчанию якорь — сегодня). Лента, а не календарный месяц:
 // в любой день, и 1-го числа тоже, на экране сегодня и предыдущий
 // рабочий день. Стрелки сдвигают ленту на неделю.
@@ -11,7 +11,7 @@
 // «Сохранить», которую легко забыть.
 //
 // Все правила — на сервере. Кликабельность дня берётся из
-// days[].state === 'open', допустимость шифра — из rows[].allows_fact.
+// days[].state === 'open', допустимость пакета — из rows[].allows_fact.
 // Компонент ничего не вычисляет сам: иначе правила оказались бы
 // записаны дважды, на двух языках, и однажды разошлись бы.
 //
@@ -22,7 +22,7 @@
 // UTC+3 сдвигает дату на сутки назад.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { fetchFactWindow, postMark } from '../api/fact';
+import { fetchFactWindow, postMark, postPackageStatus } from '../api/fact';
 import MarkSetSearch from './MarkSetSearch';
 
 // Родительный падеж — для строки «Понедельник, 12 октября».
@@ -44,7 +44,7 @@ const WEEKDAYS_LONG = [
 // Подсказки при наведении на недоступный день. Это подсказка, а не
 // правило: если сервер откажет, покажем его текст.
 const STATE_HINTS = {
-  open: 'Отметить работу по этому шифру',
+  open: 'Отметить работу по этому пакету',
   closed: 'Срок отметки истёк',
   future: 'День ещё не наступил',
   nonwork: 'Нерабочий день',
@@ -75,11 +75,11 @@ function formatToday(iso) {
  * коды символов). localeCompare дал бы другой порядок, и после
  * перезагрузки строки переставились бы.
  */
-function compareMarka(a, b) {
-  if (a.marka_full === b.marka_full) {
+function compareLabel(a, b) {
+  if (a.label === b.label) {
     return 0;
   }
-  return a.marka_full < b.marka_full ? -1 : 1;
+  return a.label < b.label ? -1 : 1;
 }
 
 /**
@@ -101,16 +101,16 @@ function formatRange(fromIso, untilIso) {
 // прошлые дни.
 const SCROLL_CONTEXT_DAYS = 7;
 
-/** Ключ клетки. Инженер один, поэтому достаточно пары (шифр, дата). */
-function cellKey(markSetId, workDate) {
-  return `${markSetId}|${workDate}`;
+/** Ключ клетки. Инженер один, поэтому достаточно пары (пакет, дата). */
+function cellKey(packageId, workDate) {
+  return `${packageId}|${workDate}`;
 }
 
 export default function FactMatrix() {
   // Ответ сервера на текущее положение ленты. null — ещё не загружено.
   const [data, setData] = useState(null);
   // Строки, добавленные через поиск: живут только в браузере до первой
-  // отметки. После отметки шифр приходит с сервера и отсюда убирается.
+  // отметки. После отметки пакет приходит с сервера и отсюда убирается.
   const [addedRows, setAddedRows] = useState([]);
   // Якорный день ленты. null — сегодня по мнению сервера: браузеру не
   // нужно знать дату при первой загрузке.
@@ -123,8 +123,11 @@ export default function FactMatrix() {
   const [notice, setNotice] = useState('');
   // Клетка, отметка которой сейчас сохраняется. Одна на всю матрицу:
   // пока запрос в пути, другие клики игнорируются, иначе два быстрых
-  // клика по разным шифрам одного дня дали бы гонку переносов.
+  // клика по разным пакетам одного дня дали бы гонку переносов.
   const [savingKey, setSavingKey] = useState(null);
+  // Пакет, статус которого сейчас сохраняется: его список заблокирован,
+  // чтобы второй выбор не обогнал первый.
+  const [statusSaving, setStatusSaving] = useState(null);
   const [searchOpen, setSearchOpen] = useState(false);
 
   // Номер последнего запроса ленты. При быстром листании ответы могут
@@ -192,7 +195,7 @@ export default function FactMatrix() {
         // Сегодня вне ленты (сдвинули стрелками) — показываем начало.
         container.scrollLeft = 0;
       } else {
-        // Липкая колонка «Шифр» закрывает левый край, поэтому её ширина
+        // Липкая колонка «Пакет» закрывает левый край, поэтому её ширина
         // вычитается; SCROLL_CONTEXT_DAYS дней слева — контекст.
         const sticky = container.querySelector('.fact-matrix__code');
         const stickyWidth = sticky ? sticky.offsetWidth : 0;
@@ -216,30 +219,36 @@ export default function FactMatrix() {
     }
     const cells = new Map();
     for (const cell of data.cells) {
-      cells.set(cellKey(cell.mark_set_id, cell.work_date), cell);
+      cells.set(cellKey(cell.package_id, cell.work_date), cell);
     }
-    const serverIds = new Set(data.rows.map((row) => row.mark_set_id));
-    // Серверные строки (уже отсортированы по шифру), затем добавленные
+    const serverIds = new Set(data.rows.map((row) => row.package_id));
+    // Серверные строки (уже отсортированы по подписи), затем добавленные
     // вручную — внизу, в порядке добавления.
     const rows = [
       ...data.rows,
-      ...addedRows.filter((row) => !serverIds.has(row.mark_set_id)),
+      ...addedRows.filter((row) => !serverIds.has(row.package_id)),
     ];
     const hasAbsence = data.days.some((day) => day.state === 'absence');
     return {
       cells,
       rows,
-      ids: new Set(rows.map((row) => row.mark_set_id)),
+      ids: new Set(rows.map((row) => row.package_id)),
       hasAbsence,
     };
   }, [data, addedRows]);
 
+  // Названия статусов по id — для чужих строк, где статус только виден.
+  const statusNames = useMemo(
+    () => new Map((data?.package_statuses || []).map((status) => [status.id, status.name])),
+    [data]
+  );
+
   // Клик по клетке (строка, день).
   async function handleCellClick(row, day) {
-    const key = cellKey(row.mark_set_id, day.work_date);
+    const key = cellKey(row.package_id, day.work_date);
     const cell = view.cells.get(key);
 
-    // Ничего не отправляем, если день или шифр закрыт, если уже идёт
+    // Ничего не отправляем, если день или пакет закрыт, если уже идёт
     // сохранение, или если это собственная отметка (сервер ответил бы
     // noop — снять отметку нельзя, только перенести).
     if (day.state !== 'open' || !row.allows_fact || savingKey || cell?.has_fact) {
@@ -249,7 +258,7 @@ export default function FactMatrix() {
     setSavingKey(key);
     setNotice('');
     try {
-      const result = await postMark(row.mark_set_id, day.work_date);
+      const result = await postMark(row.package_id, day.work_date);
 
       // Заменяем столбец дня целиком: при переносе меняются две клетки
       // (старая теряет факт, новая получает), сервер отдал обе.
@@ -262,20 +271,20 @@ export default function FactMatrix() {
           ...current.cells.filter((item) => item.work_date !== day.work_date),
           ...result.cells,
         ],
-        // Строка шифра теперь серверная: заменяем или добавляем.
-        rows: current.rows.some((item) => item.mark_set_id === result.row.mark_set_id)
+        // Строка пакета теперь серверная: заменяем или добавляем.
+        rows: current.rows.some((item) => item.package_id === result.row.package_id)
           ? current.rows.map((item) =>
-              item.mark_set_id === result.row.mark_set_id ? result.row : item
+              item.package_id === result.row.package_id ? result.row : item
             )
-          : [...current.rows, result.row].sort(compareMarka),
+          : [...current.rows, result.row].sort(compareLabel),
       }));
       setAddedRows((current) =>
-        current.filter((item) => item.mark_set_id !== result.row.mark_set_id)
+        current.filter((item) => item.package_id !== result.row.package_id)
       );
     } catch (error) {
       setNotice(error.message);
       // 409 и 404 означают, что картина на экране устарела (неявка,
-      // выпущенный шифр, вторая вкладка). Перечитываем месяц: заодно
+      // пакет приостановлен, комплект выпущен, вторая вкладка). Перечитываем: заодно
       // подтянется причина отказа.
       if (error.status === 409 || error.status === 404) {
         load(anchor);
@@ -285,16 +294,45 @@ export default function FactMatrix() {
     }
   }
 
-  // Шифр выбран в поиске — добавляем строку на месте.
+  // Исполнитель выбрал статус своего пакета — сохраняем сразу, без
+  // кнопки: так же, как отметку кликом. Сервер отдаёт строку целиком:
+  // вместе со статусом мог измениться допуск факта («Приостановлен»
+  // закрывает клетки строки).
+  async function handleStatusChange(row, statusId) {
+    setStatusSaving(row.package_id);
+    setNotice('');
+    try {
+      const result = await postPackageStatus(row.package_id, statusId);
+      setData((current) => ({
+        ...current,
+        rows: current.rows.map((item) =>
+          item.package_id === result.row.package_id ? result.row : item
+        ),
+      }));
+    } catch (error) {
+      setNotice(error.message);
+      // 403 и 404 означают, что картина устарела: пакет передали другому
+      // исполнителю или удалили. Перечитываем ленту.
+      if (error.status === 403 || error.status === 404) {
+        load(anchor);
+      }
+    } finally {
+      setStatusSaving(null);
+    }
+  }
+
+  // Пакет выбран в поиске — добавляем строку на месте.
   function handleAdd(item) {
     setAddedRows((current) => [
       ...current,
       {
-        mark_set_id: item.id,
-        marka_full: item.marka_full,
+        package_id: item.id,
+        label: item.label,
+        // Статус добавленной строки неизвестен до первой отметки — после
+        // неё строка придёт с сервера целиком.
         status_id: null,
         is_executor: false,
-        // Поиск отдаёт только шифры, по которым факт ставится.
+        // Поиск отдаёт только пакеты, по которым факт ставится.
         allows_fact: true,
         is_added: true,
       },
@@ -393,7 +431,7 @@ export default function FactMatrix() {
           <table className="fact-matrix">
             <thead>
               <tr>
-                <th className="fact-matrix__code" scope="col">Шифр</th>
+                <th className="fact-matrix__code" scope="col">Пакет</th>
                 {data.days.map((day) => {
                   const weekday = weekdayOf(day.work_date);
                   const { month, day: dayNumber } = splitIso(day.work_date);
@@ -427,7 +465,7 @@ export default function FactMatrix() {
 
               {/* Строка «Табель» — только если в ленте есть неявки. Буква
                   стоит ОДИН раз на день: неявка принадлежит человеку, а не
-                  работе по шифру. */}
+                  работе по пакету. */}
               {view.hasAbsence && (
                 <tr className="fact-matrix__tab-row">
                   <th className="fact-matrix__code text-muted small" scope="row">Табель</th>
@@ -447,29 +485,63 @@ export default function FactMatrix() {
               {view.rows.length === 0 && (
                 <tr>
                   <td className="text-muted py-4 text-center" colSpan={data.days.length + 1}>
-                    В этом периоде у вас нет шифров. Если работали над шифром —
+                    В этом периоде у вас нет пакетов. Если работали над пакетом —
                     добавьте его кнопкой ниже.
                   </td>
                 </tr>
               )}
 
               {view.rows.map((row) => (
-                <tr key={row.mark_set_id}>
+                <tr key={row.package_id}>
                   <th className="fact-matrix__code" scope="row">
-                    <span className="font-monospace">{row.marka_full}</span>
-                    {!row.allows_fact && (
-                      <span className="text-muted small ms-2">закрыт</span>
-                    )}
-                    {row.is_added && (
-                      <span className="text-primary small ms-2">добавлен</span>
-                    )}
-                    {!row.is_executor && !row.is_added && row.allows_fact && (
-                      <span className="text-muted small ms-2">не мой</span>
+                    {/* Подпись «шифр (пакет)» длиннее прежнего шифра и в
+                        колонку целиком не всегда входит — полная по
+                        наведению. */}
+                    <div>
+                      <span className="font-monospace" title={row.label}>
+                        {row.label}
+                      </span>
+                      {!row.allows_fact && (
+                        <span className="text-muted small ms-2">закрыт</span>
+                      )}
+                      {row.is_added && (
+                        <span className="text-primary small ms-2">добавлен</span>
+                      )}
+                      {!row.is_executor && !row.is_added && row.allows_fact && (
+                        <span className="text-muted small ms-2">не мой</span>
+                      )}
+                    </div>
+                    {/* Статус — вторым этажом: рядом с подписью он бы
+                        обрезался. Свой пакет — выбор статуса, чужой —
+                        только название; у добавленной строки статус
+                        неизвестен до первой отметки. */}
+                    {row.is_executor && !row.is_added ? (
+                      <select
+                        className="form-select form-select-sm mt-1"
+                        value={row.status_id}
+                        disabled={statusSaving === row.package_id}
+                        aria-label={`Статус пакета ${row.label}`}
+                        onChange={(event) =>
+                          handleStatusChange(row, Number(event.target.value))
+                        }
+                      >
+                        {data.package_statuses.map((status) => (
+                          <option key={status.id} value={status.id} title={status.note || ''}>
+                            {status.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      row.status_id != null && (
+                        <div className="small text-muted">
+                          {statusNames.get(row.status_id)}
+                        </div>
+                      )
                     )}
                   </th>
 
                   {data.days.map((day) => {
-                    const key = cellKey(row.mark_set_id, day.work_date);
+                    const key = cellKey(row.package_id, day.work_date);
                     const cell = view.cells.get(key);
                     const clickable =
                       day.state === 'open' && row.allows_fact && !cell?.has_fact && !savingKey;
@@ -487,7 +559,7 @@ export default function FactMatrix() {
                       day.state === 'absence'
                         ? `Табель: ${day.tab_letter || 'неявка'}`
                         : !row.allows_fact
-                          ? 'Шифр выпущен'
+                          ? 'Пакет приостановлен или комплект выпущен'
                           : cell?.has_fact
                             ? 'Отмечено'
                             : STATE_HINTS[day.state];
@@ -533,7 +605,7 @@ export default function FactMatrix() {
             className="btn btn-sm btn-outline-primary"
             onClick={() => setSearchOpen(true)}
           >
-            + добавить шифр
+            + добавить пакет
           </button>
         )}
 

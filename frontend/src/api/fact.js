@@ -36,16 +36,16 @@ export async function fetchFactWindow(anchor) {
 }
 
 /**
- * Поиск шифра для «+ добавить шифр».
+ * Поиск пакета для «+ добавить пакет» — по шифру или названию пакета.
  *
  * signal — от AbortController: при быстром наборе предыдущий запрос
  * отменяется, иначе медленный ответ на «053-2» мог бы прийти ПОСЛЕ
  * ответа на «053-22» и затереть правильную выдачу. Отменённый запрос
  * бросает AbortError — вызывающий код его просто игнорирует.
  */
-export async function searchMarkSets(query, signal) {
+export async function searchPackages(query, signal) {
   const params = new URLSearchParams({ q: query });
-  const response = await fetch(`${BASE}/mark-sets?${params}`, {
+  const response = await fetch(`${BASE}/packages?${params}`, {
     credentials: 'same-origin',
     headers: JSON_HEADERS,
     signal,
@@ -54,7 +54,7 @@ export async function searchMarkSets(query, signal) {
 }
 
 /**
- * Отметка одного дня: создать, перенести или ничего (свой же шифр).
+ * Отметка одного дня: создать, перенести или ничего (свой же пакет).
  *
  * workDate — строка ISO (ГГГГ-ММ-ДД) ровно в том виде, в каком пришла
  * от сервера в days[].work_date. В Date не превращаем: при UTC+3
@@ -62,12 +62,30 @@ export async function searchMarkSets(query, signal) {
  *
  * Ответ — свежее состояние дня: { action, day, cells, row }.
  */
-export async function postMark(markSetId, workDate) {
+export async function postMark(packageId, workDate) {
   const response = await fetch(`${BASE}/mark`, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { ...JSON_HEADERS, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mark_set_id: markSetId, work_date: workDate }),
+    body: JSON.stringify({ package_id: packageId, work_date: workDate }),
+  });
+  return parseResponse(response);
+}
+
+
+/**
+ * Смена статуса своего пакета исполнителем.
+ *
+ * Какой пакет — в адресе, кто меняет — сервер берёт из cookie входа и
+ * сам сверяет, что это исполнитель. Ответ — { row }: строка пакета
+ * целиком, с пересчитанным допуском факта.
+ */
+export async function postPackageStatus(packageId, statusId) {
+  const response = await fetch(`${BASE}/packages/${packageId}/status`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { ...JSON_HEADERS, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status_id: statusId }),
   });
   return parseResponse(response);
 }

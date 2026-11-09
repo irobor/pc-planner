@@ -383,14 +383,14 @@ async def _load_fact_cells(
 
 
 # Пакет и то, что о нём нужно контексту: шифр (для подписи), строка
-# состава и её отдел (для проверки области).
-PackageFetched = tuple[WorkPackage, str, int, int]
+# состава и её отдел (для проверки области), дата выпуска комплекта.
+PackageFetched = tuple[WorkPackage, str, int, int, Optional[date]]
 
 
 async def _fetch_packages(
     db: AsyncSession, *conditions: ColumnElement[bool]
 ) -> list[PackageFetched]:
-    """Пакеты по условиям — вместе с шифром, строкой состава и отделом.
+    """Пакеты по условиям — с шифром, строкой состава, отделом, выпуском.
 
     Один запрос вместо пакета, шифра и состава по отдельности: все три
     загрузчика пакетов читают одни и те же поля. Отдел нужен только
@@ -403,6 +403,7 @@ async def _fetch_packages(
             ProjectMarkSet.marka_full,
             ProjectMarkSet.composition_id,
             ProjectComposition.department_id,
+            ProjectMarkSet.released_on,
         )
         .join(ProjectMarkSet, ProjectMarkSet.id == WorkPackage.mark_set_id)
         .join(
@@ -412,15 +413,18 @@ async def _fetch_packages(
         .where(*conditions)
     )
     return [
-        (package, marka_full, composition_id, department_id)
-        for package, marka_full, composition_id, department_id in (
+        (package, marka_full, composition_id, department_id, released_on)
+        for package, marka_full, composition_id, department_id, released_on in (
             await db.execute(stmt)
         ).all()
     ]
 
 
 def _package_row(
-    package: WorkPackage, marka_full: str, composition_id: int
+    package: WorkPackage,
+    marka_full: str,
+    composition_id: int,
+    released_on: Optional[date],
 ) -> PackageRow:
     """Строка контекста из пакета и его шифра."""
     return PackageRow(
@@ -429,6 +433,7 @@ def _package_row(
         executor_id=package.executor_id,
         composition_id=composition_id,
         status_id=package.status_id,
+        released=released_on is not None,
     )
 
 
@@ -470,8 +475,8 @@ async def _load_packages(
         rows.extend(await _fetch_packages(db, WorkPackage.id.in_(missing)))
 
     return {
-        package.id: _package_row(package, marka_full, composition_id)
-        for package, marka_full, composition_id, _department_id in rows
+        package.id: _package_row(package, marka_full, composition_id, released_on)
+        for package, marka_full, composition_id, _department_id, released_on in rows
     }
 
 
@@ -973,11 +978,11 @@ async def _load_operation_packages(
     rows = await _fetch_packages(db, WorkPackage.id.in_(package_ids))
 
     found: dict[int, PackageRow] = {}
-    for package, marka_full, composition_id, department_id in rows:
+    for package, marka_full, composition_id, department_id, released_on in rows:
         # Область управления. can_manage сам обрабатывает админа.
         if not scope.can_manage(department_id):
             raise PackageForbiddenError("Пакет вне области управления")
-        row = _package_row(package, marka_full, composition_id)
+        row = _package_row(package, marka_full, composition_id, released_on)
         if package.id in adding_ids and row.executor_id is None:
             raise NoExecutorError(f"У пакета {row.label} не назначен исполнитель")
         found[package.id] = row

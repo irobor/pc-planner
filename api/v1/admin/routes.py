@@ -49,11 +49,11 @@ from app.api.v1.admin.service import (
     list_employees,
     load_admin_grid,
 )
-from app.api.v1.fact.schemas import MarkSetFound
+from app.api.v1.fact.schemas import PackageFound
 from app.api.v1.fact.service import (
     SEARCH_MIN_LENGTH,
     SearchTooShortError,
-    search_mark_sets,
+    search_packages,
 )
 from app.core.dependencies import PermissionChecker, get_db
 from app.models.user import User
@@ -176,9 +176,9 @@ async def read_grid(
 
 @router.get(
     "/mark-sets",
-    response_model=list[MarkSetFound],
+    response_model=list[PackageFound],
     status_code=status.HTTP_200_OK,
-    summary="Поиск шифра любого статуса",
+    summary="Поиск пакета любого статуса",
 )
 async def find_mark_sets(
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -191,19 +191,22 @@ async def find_mark_sets(
             description="Фрагмент шифра",
         ),
     ],
-) -> list[MarkSetFound]:
-    """Шифры по подстроке — вся организация, ЛЮБОЙ статус.
+) -> list[PackageFound]:
+    """Пакеты по подстроке подписи — вся организация, ЛЮБОЙ статус.
 
-    Тот же поиск, что у инженера, но без фильтра статусов: администратор
-    исправляет и выпущенные комплекты. Близости к подразделению нет —
-    администратор ни к какому подразделению не привязан.
+    Тот же поиск, что у инженера, но без фильтра: администратор
+    исправляет и приостановленные пакеты, и выпущенные комплекты.
+    Близости к подразделению нет — администратор ни к какому
+    подразделению не привязан.
 
     Коды ошибок:
       403 — нет прав;
       422 — строка поиска короче 5 символов.
     """
     try:
-        return await search_mark_sets(db, department_id=None, query=q, status_ids=None)
+        return await search_packages(
+            db, department_id=None, query=q, only_markable=False
+        )
     except SearchTooShortError:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

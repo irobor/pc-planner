@@ -1,15 +1,18 @@
 # app/api/v1/fact/service.py
-"""Сервисный слой факта: матрица инженера, поиск шифра, отметка дня.
+"""Сервисный слой факта: лента инженера, поиск пакета, отметка, статус.
 
 Здесь только работа с БД. Правила — «можно ли отметить день» и «что
 делать с кликом» — живут в fact/rules.py и проверяются в консоли без
 базы. Снимок данных и загрузчики переиспользуются из планирования:
 тот же AvailabilityContext, собранный по одному инженеру.
 
-Три сценария:
-  * load_fact_window — лента от якорного дня (чтение);
-  * search_mark_sets — поиск шифра для «+ добавить шифр» (чтение);
-  * set_mark         — отметка одного дня (запись).
+Четыре сценария:
+  * load_fact_window   — лента от якорного дня (чтение);
+  * search_packages    — поиск пакета для «+ добавить пакет» (чтение);
+  * set_mark           — отметка одного дня (запись);
+  * set_package_status — исполнитель меняет статус своего пакета (запись).
+
+Факт ставится на пакет работ, а не на комплект: строка ленты — пакет.
 
 Тексты для пользователя здесь не собираются: исключения несут причину
 и данные для подстановки, формулировки живут в routes.py.
@@ -32,23 +35,31 @@ from app.api.v1.fact.rules import (
     decide_mark,
     fact_day_verdict,
     fact_window_start,
-    set_allows_fact,
+    package_allows_fact,
 )
 from app.api.v1.fact.schemas import (
     FactCellOut,
     FactDayOut,
-    FactWindow,
     FactRowOut,
+    FactWindow,
     MarkResult,
-    MarkSetFound,
+    PackageFound,
+    PackageStatusOut,
+    StatusResult,
 )
-from app.api.v1.planning.rules import AvailabilityContext
+from app.api.v1.planning.rules import AvailabilityContext, package_label
 from app.api.v1.planning.service import (
     load_calendar,
     load_context,
     resolve_employees_by_ids,
 )
-from app.models.composition import Department, ProjectComposition, ProjectMarkSet
+from app.models.composition import (
+    Department,
+    PackageStatus,
+    ProjectComposition,
+    ProjectMarkSet,
+    WorkPackage,
+)
 from app.models.planning import FactCalendarCell
 
 logger = logging.getLogger(__name__)
@@ -62,7 +73,7 @@ DAYS_BACK: int = 14
 DAYS_FORWARD: int = 28
 SHIFT_DAYS: int = 7
 
-# Поиск шифра: минимальная длина строки (после обрезки пробелов) и
+# Поиск пакета: минимальная длина строки (после обрезки пробелов) и
 # предел выдачи. Короткая строка дала бы сотни совпадений по общему
 # префиксу проекта — искать имеет смысл от номера проекта и глубже.
 SEARCH_MIN_LENGTH: int = 5
@@ -104,16 +115,30 @@ class SearchTooShortError(FactError):
     """Строка поиска короче SEARCH_MIN_LENGTH после обрезки пробелов."""
 
 
-class MarkSetNotFoundError(FactError):
-    """Шифр с таким id не существует."""
+class PackageNotFoundError(FactError):
+    """Пакет с таким id не существует."""
 
 
-class MarkSetClosedError(FactError):
-    """Шифр в статусе, по которому факт не ставится (выпущен)."""
+class PackageClosedError(FactError):
+    """По пакету факт не ставится: пакет приостановлен или комплект выпущен.
 
-    def __init__(self, marka_full: str) -> None:
-        super().__init__(marka_full)
-        self.marka_full = marka_full
+    Причина — в полях: released и название статуса. Текст собирает
+    routes.py, сервис формулировок не знает.
+    """
+
+    def __init__(self, label: str, released: bool, status_name: str) -> None:
+        super().__init__(label)
+        self.label = label
+        self.released = released
+        self.status_name = status_name
+
+
+class NotExecutorError(FactError):
+    """Статус пакета меняет инженер, который не его исполнитель."""
+
+
+class UnknownStatusError(FactError):
+    """Статуса с таким id нет в справочнике."""
 
 
 class DayRejectedError(FactError):
@@ -174,8 +199,8 @@ async def _load_employee_context(
     """Снимок доступности по одному инженеру — тот же, что у сетки.
 
     Отличие от сетки начальника — только в наборе статусов для строк
-    «я исполнитель»: FACT_STATUS_IDS шире GRID_STATUS_IDS (включает
-    «На проверке»).
+    «я исполнитель»: FACT_STATUS_IDS шире GRID_STATUS_IDS — включает
+    готовые пакеты и стадии контроля и согласования.
 
     Если у инженера нет назначения, пересекающего интервал, employees
     окажется пустым — и все дни получат вердикт not_assigned. Это
@@ -197,55 +222,54 @@ async def _load_employee_context(
 
 
 def _collect_rows(ctx: AvailabilityContext, employee_id: int) -> list[FactRowOut]:
-    """Строки матрицы: объединение трёх серверных источников.
+    """Строки ленты: объединение трёх серверных источников.
 
-    1. Инженер — исполнитель шифра в статусе FACT_STATUS_IDS (этот
-       фильтр уже применил _load_mark_sets).
-    2. У инженера есть плановая ячейка по шифру в интервале.
-    3. У инженера есть факт по шифру в интервале.
+    1. Инженер — исполнитель пакета в статусе FACT_STATUS_IDS (этот
+       фильтр уже применил загрузчик пакетов планирования).
+    2. У инженера есть плановая ячейка по пакету в интервале.
+    3. У инженера есть факт по пакету в интервале.
 
     Четвёртый источник — ручное добавление через поиск — живёт в
     браузере до первой отметки, сервер о нём не знает.
     """
-    mark_set_ids: set[int] = {
-        mark_set.id
-        for mark_set in ctx.mark_sets.values()
-        if mark_set.id_executor == employee_id
+    package_ids: set[int] = {
+        package.id
+        for package in ctx.packages.values()
+        if package.executor_id == employee_id
     }
-    mark_set_ids |= {
-        cell.mark_set_id
+    package_ids |= {
+        cell.package_id
         for (emp_id, _day), cell in ctx.plan_cells.items()
         if emp_id == employee_id
     }
-    mark_set_ids |= {
-        cell.mark_set_id
+    package_ids |= {
+        cell.package_id
         for (emp_id, _day), cell in ctx.fact_cells.items()
         if emp_id == employee_id
     }
 
     rows: list[FactRowOut] = []
-    for mark_set_id in mark_set_ids:
-        mark_set = ctx.mark_sets.get(mark_set_id)
-        # status_id в MarkSetRow объявлен Optional, хотя в БД NOT NULL;
-        # проверка сужает тип для mypy и страхует от неполных данных.
-        if mark_set is None or mark_set.status_id is None:
-            # Штатно невозможно: _load_mark_sets дотягивает шифры из
+    for package_id in package_ids:
+        package = ctx.packages.get(package_id)
+        if package is None:
+            # Штатно невозможно: загрузчик пакетов дотягивает их из
             # ячеек. Пропуск безопаснее падения на отрисовке.
-            logger.warning("Шифр %s отсутствует в контексте факта", mark_set_id)
+            logger.warning("Пакет %s отсутствует в контексте факта", package_id)
             continue
         rows.append(
             FactRowOut(
-                mark_set_id=mark_set.id,
-                marka_full=mark_set.marka_full,
-                status_id=mark_set.status_id,
-                is_executor=mark_set.id_executor == employee_id,
-                allows_fact=set_allows_fact(mark_set.status_id),
+                package_id=package.id,
+                label=package.label,
+                status_id=package.status_id,
+                is_executor=package.executor_id == employee_id,
+                allows_fact=package_allows_fact(package.status_id, package.released),
             )
         )
 
     # Устойчивый порядок: без сортировки обход множества менял бы порядок
-    # строк от запроса к запросу, и матрица «прыгала» бы.
-    rows.sort(key=lambda row: row.marka_full)
+    # строк от запроса к запросу, и лента «прыгала» бы. Подпись
+    # начинается с шифра — пакеты одного комплекта идут подряд.
+    rows.sort(key=lambda row: row.label)
     return rows
 
 
@@ -273,32 +297,45 @@ def _collect_days(
 
 
 def _collect_cells(ctx: AvailabilityContext, employee_id: int) -> list[FactCellOut]:
-    """Непустые клетки: план и факт, сведённые по паре (шифр, день).
+    """Непустые клетки: план и факт, сведённые по паре (пакет, день).
 
     В день у инженера не больше одной плановой и одной фактической
-    ячейки. Если шифр один — это одна клетка с обоими флагами (факт по
-    плану); если разные — две клетки (план на одном шифре, факт вне
+    ячейки. Если пакет один — это одна клетка с обоими флагами (факт по
+    плану); если разные — две клетки (план на одном пакете, факт вне
     плана на другом).
     """
     flags: dict[tuple[int, date], list[bool]] = {}
     for (emp_id, day), plan in ctx.plan_cells.items():
         if emp_id == employee_id:
-            flags.setdefault((plan.mark_set_id, day), [False, False])[0] = True
+            flags.setdefault((plan.package_id, day), [False, False])[0] = True
     for (emp_id, day), fact in ctx.fact_cells.items():
         if emp_id == employee_id:
-            flags.setdefault((fact.mark_set_id, day), [False, False])[1] = True
+            flags.setdefault((fact.package_id, day), [False, False])[1] = True
 
     cells = [
         FactCellOut(
-            mark_set_id=mark_set_id,
+            package_id=package_id,
             work_date=day,
             has_plan=has_plan,
             has_fact=has_fact,
         )
-        for (mark_set_id, day), (has_plan, has_fact) in flags.items()
+        for (package_id, day), (has_plan, has_fact) in flags.items()
     ]
-    cells.sort(key=lambda cell: (cell.work_date, cell.mark_set_id))
+    cells.sort(key=lambda cell: (cell.work_date, cell.package_id))
     return cells
+
+
+async def _load_package_statuses(db: AsyncSession) -> list[PackageStatusOut]:
+    """Справочник статусов пакета по sort_order — шесть строк."""
+    rows = (
+        await db.execute(
+            select(PackageStatus).order_by(PackageStatus.sort_order, PackageStatus.id)
+        )
+    ).scalars()
+    return [
+        PackageStatusOut(id=status.id, name=status.name, note=status.note)
+        for status in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -350,11 +387,12 @@ async def load_fact_window(
         rows=_collect_rows(ctx, employee_id),
         days=_collect_days(ctx, employee_id, today, window_from),
         cells=_collect_cells(ctx, employee_id),
+        package_statuses=await _load_package_statuses(db),
     )
 
 
 # ---------------------------------------------------------------------------
-# Сценарий 2. Поиск шифра
+# Сценарий 2. Поиск пакета
 # ---------------------------------------------------------------------------
 
 
@@ -367,29 +405,33 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-async def search_mark_sets(
+async def search_packages(
     db: AsyncSession,
     *,
     department_id: Optional[int],
     query: str,
-    status_ids: Optional[tuple[int, ...]] = FACT_STATUS_IDS,
-) -> list[MarkSetFound]:
-    """Шифры по подстроке — вся организация, ближние сначала.
+    only_markable: bool = True,
+) -> list[PackageFound]:
+    """Пакеты по подстроке подписи — вся организация, ближние сначала.
+
+    Ищется по видимой подписи «053-22-14а-ЭМ (освещение)»: «14а-ЭМ»
+    найдёт все пакеты комплекта, «освещение» — пакеты с таким названием.
+    Искать по тому, что человек видит, честнее, чем по отдельным полям.
 
     department_id — текущее подразделение инженера
     (scope.get_user_department_id). None допустим: тогда все результаты
-    равноудалены и сортируются по шифру.
+    равноудалены и сортируются по подписи.
 
     Близость (proximity):
-      0 — шифр его подразделения;
+      0 — пакет его подразделения;
       1 — его отдел: родительский узел или соседнее бюро под тем же
           родителем; если сам инженер числится на уровне отдела — бюро
           внутри него;
       2 — остальная организация.
 
-    status_ids — какие статусы искать. По умолчанию FACT_STATUS_IDS
-    (инженеру выпущенный шифр не нужен). None — любые: администратор
-    данных исправляет и выпущенные комплекты.
+    only_markable — только пакеты, по которым можно отметить факт: не
+    приостановленные и не из выпущенного комплекта. Инженеру остальные
+    не нужны. False — все: администратор данных исправляет и их.
     """
     text_query = query.strip()
     if len(text_query) < SEARCH_MIN_LENGTH:
@@ -421,39 +463,47 @@ async def search_mark_sets(
             else_=2,
         )
 
-    conditions = [
-        ProjectMarkSet.marka_full.ilike(f"%{_escape_like(text_query)}%", escape="\\"),
+    # Подпись собирается в SQL тем же видом, что package_label в Python:
+    # «шифр (пакет)». Искать по ней — значит искать по тому, что видно.
+    label = func.concat(ProjectMarkSet.marka_full, " (", WorkPackage.name, ")")
+    conditions: list[ColumnElement[bool]] = [
+        label.ilike(f"%{_escape_like(text_query)}%", escape="\\"),
     ]
-    if status_ids is not None:
-        conditions.append(ProjectMarkSet.status_id.in_(status_ids))
+    if only_markable:
+        conditions += [
+            WorkPackage.status_id.in_(FACT_STATUS_IDS),
+            ProjectMarkSet.released_on.is_(None),
+        ]
 
     stmt = (
         select(
-            ProjectMarkSet.id,
+            WorkPackage.id,
             ProjectMarkSet.marka_full,
+            WorkPackage.name,
             Department.code,
             Department.name,
             proximity.label("proximity"),
         )
+        .join(ProjectMarkSet, ProjectMarkSet.id == WorkPackage.mark_set_id)
         .join(
             ProjectComposition,
             ProjectComposition.id == ProjectMarkSet.composition_id,
         )
         .join(Department, Department.id == ProjectComposition.department_id)
         .where(*conditions)
-        .order_by(proximity, ProjectMarkSet.marka_full)
+        .order_by(proximity, ProjectMarkSet.marka_full, WorkPackage.name)
         .limit(SEARCH_LIMIT)
     )
     rows = (await db.execute(stmt)).all()
     return [
-        MarkSetFound(
-            id=mark_set_id,
-            marka_full=marka_full,
+        PackageFound(
+            id=package_id,
+            label=package_label(marka_full, package_name),
             department_code=code,
             department_name=name,
             proximity=level,
         )
-        for mark_set_id, marka_full, code, name, level in rows
+        for package_id, marka_full, package_name, code, name, level in rows
     ]
 
 
@@ -480,7 +530,7 @@ async def _day_result(
     db: AsyncSession,
     *,
     employee_id: int,
-    mark_set_id: int,
+    package_id: int,
     work_date: date,
     today: date,
     action: MarkAction,
@@ -493,10 +543,10 @@ async def _day_result(
     ctx = await _load_employee_context(db, employee_id, work_date, work_date)
     window_from = await _load_window_from(db, today)
 
-    rows = {row.mark_set_id: row for row in _collect_rows(ctx, employee_id)}
-    row = rows.get(mark_set_id)
+    rows = {row.package_id: row for row in _collect_rows(ctx, employee_id)}
+    row = rows.get(package_id)
     if row is None:
-        # После успешной отметки шифр обязан прийти через источник
+        # После успешной отметки пакет обязан прийти через источник
         # «есть факт». Если нет — данные поменялись между commit и
         # чтением; честнее попросить обновить, чем отдать неполный ответ.
         raise ConcurrentChangeError(work_date)
@@ -522,15 +572,48 @@ async def _fresh_verdict(
     return fact_day_verdict(ctx, employee_id, work_date, today, window_from)
 
 
+async def _load_package_info(
+    db: AsyncSession, package_id: int
+) -> tuple[WorkPackage, str, bool, str]:
+    """Пакет, его подпись, признак выпуска комплекта и название статуса.
+
+    Одним запросом: всё это нужно и отметке (допуск факта и текст
+    отказа), и смене статуса (строка ответа). Значения копируются из
+    результата сразу — после commit/rollback ORM-объект «протухает».
+    """
+    row = (
+        await db.execute(
+            select(
+                WorkPackage,
+                ProjectMarkSet.marka_full,
+                ProjectMarkSet.released_on,
+                PackageStatus.name,
+            )
+            .join(ProjectMarkSet, ProjectMarkSet.id == WorkPackage.mark_set_id)
+            .join(PackageStatus, PackageStatus.id == WorkPackage.status_id)
+            .where(WorkPackage.id == package_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise PackageNotFoundError(str(package_id))
+    package, marka_full, released_on, status_name = row
+    return (
+        package,
+        package_label(marka_full, package.name),
+        released_on is not None,
+        status_name,
+    )
+
+
 async def set_mark(
     db: AsyncSession,
     *,
     employee_id: int,
-    mark_set_id: int,
+    package_id: int,
     work_date: date,
     today: date,
 ) -> MarkResult:
-    """Отметка одного дня: создать, перенести или ничего (свой же шифр).
+    """Отметка одного дня: создать, перенести или ничего (свой же пакет).
 
     Порядок внутри транзакции важен:
 
@@ -540,7 +623,8 @@ async def set_mark(
        вклинятся между проверкой и записью. Обратный порядок (сначала
        строка, потом блокировка) мог бы дать взаимную блокировку с
        табельщицей.
-    2. Шифр существует и допускает факт.
+    2. Пакет существует и допускает факт: не приостановлен, комплект не
+       выпущен.
     3. Вердикт дня по снимку, решение decide_mark.
     4. INSERT или UPDATE. Перенос — именно UPDATE: DELETE + INSERT
        каскадом стёр бы связи в fact_kanban_cells.
@@ -555,22 +639,19 @@ async def set_mark(
         select(func.pg_advisory_xact_lock(FACT_LOCK_NAMESPACE, employee_id))
     )
 
-    # Значения шифра копируются в локальные переменные сразу: после
-    # commit/rollback ORM-объект «протухает», и обращение к его полям в
-    # async-сессии упало бы с MissingGreenlet.
-    mark_set = await db.get(ProjectMarkSet, mark_set_id)
-    if mark_set is None:
+    try:
+        package, label, released, status_name = await _load_package_info(db, package_id)
+    except PackageNotFoundError:
         await db.rollback()
-        raise MarkSetNotFoundError(str(mark_set_id))
-    marka_full = mark_set.marka_full
-    if not set_allows_fact(mark_set.status_id):
+        raise
+    if not package_allows_fact(package.status_id, released):
         await db.rollback()
-        raise MarkSetClosedError(marka_full)
+        raise PackageClosedError(label, released, status_name)
 
     ctx = await _load_employee_context(db, employee_id, work_date, work_date)
     window_from = await _load_window_from(db, today)
     verdict = fact_day_verdict(ctx, employee_id, work_date, today, window_from)
-    action = decide_mark(verdict, mark_set_id)
+    action = decide_mark(verdict, package_id)
 
     if action is MarkAction.REJECT:
         # rollback освобождает advisory-блокировку (она транзакционная).
@@ -583,7 +664,7 @@ async def set_mark(
         return await _day_result(
             db,
             employee_id=employee_id,
-            mark_set_id=mark_set_id,
+            package_id=package_id,
             work_date=work_date,
             today=today,
             action=action,
@@ -593,7 +674,7 @@ async def set_mark(
         if action is MarkAction.INSERT:
             await db.execute(
                 insert(FactCalendarCell).values(
-                    mark_set_id=mark_set_id,
+                    package_id=package_id,
                     employee_id=employee_id,
                     work_date=work_date,
                 )
@@ -610,7 +691,7 @@ async def set_mark(
                         FactCalendarCell.employee_id == employee_id,
                         FactCalendarCell.work_date == work_date,
                     )
-                    .values(mark_set_id=mark_set_id)
+                    .values(package_id=package_id)
                     .returning(FactCalendarCell.id)
                 )
             ).scalar_one_or_none()
@@ -638,8 +719,59 @@ async def set_mark(
     return await _day_result(
         db,
         employee_id=employee_id,
-        mark_set_id=mark_set_id,
+        package_id=package_id,
         work_date=work_date,
         today=today,
         action=action,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Сценарий 4. Статус своего пакета
+# ---------------------------------------------------------------------------
+
+
+async def set_package_status(
+    db: AsyncSession,
+    *,
+    employee_id: int,
+    package_id: int,
+    status_id: int,
+) -> StatusResult:
+    """Исполнитель меняет статус своего пакета.
+
+    Статус пакета ставит исполнитель, включая стадии согласования:
+    комплект ушёл на согласование — каждый переводит свой пакет; вернули
+    на доработку — обратно «В работе». Начальник может сделать то же в
+    «Бюро» — последнее сохранение побеждает, как при любой правке.
+
+    Только исполнитель: сверяется с текущим назначением пакета, а не с
+    тем, что пришло в запросе. Порядок статусов свободный — ограничение
+    переходов мешало бы исправлять ошибки.
+
+    Ответ — строка целиком: вместе со статусом может измениться допуск
+    факта («Приостановлен» закрывает клетки).
+    """
+    package, label, released, _old_status = await _load_package_info(db, package_id)
+
+    if package.executor_id != employee_id:
+        raise NotExecutorError(label)
+
+    known = (
+        await db.execute(select(PackageStatus.id).where(PackageStatus.id == status_id))
+    ).first()
+    if known is None:
+        raise UnknownStatusError(str(status_id))
+
+    package.status_id = status_id
+    await db.commit()
+
+    return StatusResult(
+        row=FactRowOut(
+            package_id=package_id,
+            label=label,
+            status_id=status_id,
+            is_executor=True,
+            allows_fact=package_allows_fact(status_id, released),
+        )
     )

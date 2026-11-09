@@ -47,13 +47,14 @@ from app.api.v1.planning.rules import (
 # две недели покрывают самый длинный разрыв.
 CALENDAR_LOOKBACK_DAYS: int = 14
 
-# Статусы шифра (set_statuses.id), по которым можно отметить факт:
-# 1 — В плане, 2 — В работе, 3 — На проверке. «Выпущен» (4) закрыт:
-# изменения выпускаются новым комплектом со своим marka_no.
-# Шире GRID_STATUS_IDS планирования намеренно: начальник планирует то,
-# что в работе, а инженер отмечает всё, над чем реально работал, —
-# включая исправление замечаний и работу до смены статуса.
-FACT_STATUS_IDS: tuple[int, ...] = (1, 2, 3)
+# Статусы пакета (package_statuses.id), по которым можно отметить факт:
+# все, кроме 6 — «Приостановлен»: работа стоит, отмечать нечего.
+# «Готово» и стадии контроля и согласования (2–5) открыты сознательно:
+# инженер исправляет замечания, не меняя статус пакета.
+# Шире PLAN_STATUS_IDS планирования намеренно: начальник планирует то,
+# что в работе, а инженер отмечает всё, над чем реально работал.
+# Выпуск комплекта закрывает факт отдельно — см. package_allows_fact.
+FACT_STATUS_IDS: tuple[int, ...] = (1, 2, 3, 4, 5)
 
 
 class FactDayState(str, Enum):
@@ -130,8 +131,8 @@ class FactVerdict:
     # отличает создание от переноса. Для закрытых дней не заполняется:
     # отметки для отрисовки идут отдельным слоем ячеек, как в сетке
     # начальника.
-    current_mark_set_id: Optional[int] = None
-    current_marka_full: Optional[str] = None
+    current_package_id: Optional[int] = None
+    current_label: Optional[str] = None
 
     @property
     def can_mark(self) -> bool:
@@ -139,13 +140,16 @@ class FactVerdict:
         return self.state is FactDayState.OPEN
 
 
-def set_allows_fact(status_id: int) -> bool:
-    """Можно ли отметить факт по шифру в этом статусе.
+def package_allows_fact(status_id: int, released: bool) -> bool:
+    """Можно ли отметить факт по пакету.
 
-    Проверяется только в момент новой записи. Если шифр выпустили после
-    отметки, история остаётся нетронутой.
+    Два условия: пакет не приостановлен и комплект не выпущен — изменения
+    выпущенного комплекта выпускаются новым комплектом со своим шифром.
+
+    Проверяется только в момент новой записи. Если пакет приостановили
+    или комплект выпустили после отметки, история остаётся нетронутой.
     """
-    return status_id in FACT_STATUS_IDS
+    return status_id in FACT_STATUS_IDS and not released
 
 
 def previous_working_day(
@@ -247,21 +251,21 @@ def fact_day_verdict(
         return FactVerdict(state=FactDayState.OPEN)
     return FactVerdict(
         state=FactDayState.OPEN,
-        current_mark_set_id=fact.mark_set_id,
-        current_marka_full=fact.marka_full,
+        current_package_id=fact.package_id,
+        current_label=fact.label,
     )
 
 
-def decide_mark(verdict: FactVerdict, mark_set_id: int) -> MarkAction:
-    """Решает, что сделать с кликом по клетке (mark_set_id, день).
+def decide_mark(verdict: FactVerdict, package_id: int) -> MarkAction:
+    """Решает, что сделать с кликом по клетке (package_id, день).
 
     Сервис только исполняет решение — правило «одна отметка в день,
     клик переносит» записано здесь, а не размазано по service.py.
     """
     if not verdict.can_mark:
         return MarkAction.REJECT
-    if verdict.current_mark_set_id is None:
+    if verdict.current_package_id is None:
         return MarkAction.INSERT
-    if verdict.current_mark_set_id == mark_set_id:
+    if verdict.current_package_id == package_id:
         return MarkAction.NOOP
     return MarkAction.MOVE
