@@ -127,7 +127,7 @@ def _to_rejections(
     """
     return [
         Rejection(
-            mark_set_id=item.mark_set_id,
+            mark_set_id=item.package_id,
             work_date=item.work_date,
             state=item.state,
             message=_describe(item),

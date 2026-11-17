@@ -8,11 +8,12 @@ AvailabilityContext по одному сотруднику и та же add_plan
 начальника, — администратор пишет план ТЕМ ЖЕ кодом, а не своей копией.
 Значение ячейки — пакет работ.
 
-Четыре сценария:
+Пять сценариев:
   * list_employees      — список имён для выбора сотрудника;
   * load_admin_grid     — сетка одного сотрудника на интервал;
   * apply_admin_changes — пачка правок плана и факта + запись в журнал;
-  * list_changesets     — журнал правок сотрудника.
+  * list_changesets     — журнал правок сотрудника;
+  * load_summary_report — сводный отчёт «проекты × бюро» за период.
 
 Область управления (Scope) здесь не используется: администратор видит
 всех сотрудников организации, граница доступа — только право
@@ -24,12 +25,15 @@ AvailabilityContext по одному сотруднику и та же add_plan
 
 import logging
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, timedelta
+from enum import Enum
 from typing import Optional, cast
 
-from sqlalchemy import delete, func, insert, or_, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.api.v1.admin.rules import (
     AdminRejection,
@@ -63,11 +67,26 @@ from app.api.v1.planning.service import (
     load_package_status_names,
     resolve_employees_by_ids,
 )
+from app.core.assignments import is_current_assignment
 from app.models.admin import AdminChangeItem, AdminChangeset
-from app.models.composition import Department, ProjectMarkSet, WorkPackage
+from app.models.composition import (
+    Department,
+    ProjectComposition,
+    ProjectMarkSet,
+    WorkPackage,
+)
 from app.models.employee import Employee, EmployeeAssignment
-from app.models.planning import FactCalendarCell, PlanCalendarCell
+from app.models.planning import (
+    AbsencePeriod,
+    AbsenceType,
+    DayType,
+    FactCalendarCell,
+    PlanCalendarCell,
+    ProductionCalendar,
+)
+from app.models.project import Enterprise, Project
 from app.models.user import User
+from app.models.views import VProjectRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +115,7 @@ class EmployeeNotFoundError(AdminError):
 
 
 class InvalidIntervalError(AdminError):
-    """Интервал сетки бессмыслен или шире MAX_GRID_DAYS."""
+    """Интервал сетки или отчёта бессмыслен; у сетки — шире MAX_GRID_DAYS."""
 
 
 class EmptyCommentError(AdminError):
@@ -590,3 +609,326 @@ async def list_changesets(
         )
         for cs_id, created_at, username, comment in head_rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Сценарий 5. Сводный отчёт «проекты × бюро»
+#
+# Строка — проект (или вид неявки), колонка — бюро, в ячейке — дни факта
+# или плана за период. День идёт в колонку бюро, где инженер числился В
+# ЭТОТ ДЕНЬ, — чей это шифр, значения не имеет. Отчёт за прошлый период
+# не меняется задним числом после перевода сотрудника.
+#
+# Бюро — узел третьего уровня дерева (ПЦ → отдел → бюро). Начальники
+# отделов, ГИП и начальник ПЦ числятся выше, в плане и факте не
+# участвуют и в отчёт не попадают — отдельного фильтра по ним нет, их
+# отсекает условие «назначение — в бюро».
+#
+# Двойного счёта нет на уровне БД: EXCLUDE-ограничения дают сотруднику
+# на день ровно одно назначение и не больше одной неявки.
+# ---------------------------------------------------------------------------
+
+
+class ReportMode(str, Enum):
+    """Что суммирует отчёт."""
+
+    FACT = "fact"
+    PLAN = "plan"
+
+
+# Виды неявок — строки отчёта, в этом порядке; показываются всегда, даже
+# нулевые. Отбор по коду, а не по флагу blocks_planning: «Выходной по
+# индивидуальному графику» блокирует планирование, но в отчёт не входит.
+# Код — стабильная опора для логики (комментарий к absence_types.code),
+# подпись строки берётся из справочника.
+REPORT_ABSENCE_CODES: tuple[str, ...] = (
+    "SICK",
+    "VACATION_MAIN",
+    "MATERNITY",
+    "CHILDCARE",
+    "STUDY",
+    "UNPAID",
+    "BUSINESS_TRIP",
+)
+
+# Условность отчёта: человеко-часы = дни × 8, короткие предпраздничные
+# дни не учитываются.
+HOURS_PER_DAY: int = 8
+
+
+@dataclass(frozen=True)
+class SummaryBureau:
+    """Колонка отчёта: бюро и отдел, в который оно входит."""
+
+    id: int
+    code: str
+    name: str
+    department_code: str
+    department_name: str
+
+
+@dataclass(frozen=True)
+class SummaryRow:
+    """Строка отчёта: проект, вид неявки или итог.
+
+    days — id бюро → дни. Бюро без дней в словаре нет: нули рисует
+    шаблон. У неявки и итога нет номера проекта и заказчика.
+    """
+
+    title: str
+    days: dict[int, int]
+    code: str | None = None
+    customer: str | None = None
+
+    @property
+    def total(self) -> int:
+        return sum(self.days.values())
+
+    @property
+    def hours(self) -> int:
+        return self.total * HOURS_PER_DAY
+
+
+@dataclass(frozen=True)
+class SummaryReport:
+    """Сводный отчёт за период — всё, что нужно шаблону."""
+
+    mode: ReportMode
+    date_from: date
+    date_to: date
+    bureaus: list[SummaryBureau]
+    projects: list[SummaryRow]
+    absences: list[SummaryRow]
+    projects_total: SummaryRow
+    absences_total: SummaryRow
+    grand_total: SummaryRow
+
+    @property
+    def departments(self) -> list[tuple[str, str, int]]:
+        """Отделы над колонками бюро: код, название, сколько бюро под ним.
+
+        Порядок — порядок колонок: bureaus уже отсортированы по отделу.
+        Jinja-фильтр groupby здесь не годится — он пересортировал бы
+        отделы по алфавиту, и шапка разошлась бы с колонками.
+        """
+        groups: list[tuple[str, str, int]] = []
+        for b in self.bureaus:
+            if groups and groups[-1][0] == b.department_code:
+                code, name, span = groups[-1]
+                groups[-1] = (code, name, span + 1)
+            else:
+                groups.append((b.department_code, b.department_name, 1))
+        return groups
+
+    
+def _sum_rows(title: str, rows: Iterable[SummaryRow]) -> SummaryRow:
+    """Итоговая строка: дни по каждому бюро сложены по всем строкам."""
+    days: dict[int, int] = {}
+    for row in rows:
+        for bureau_id, count in row.days.items():
+            days[bureau_id] = days.get(bureau_id, 0) + count
+    return SummaryRow(title=title, days=days)
+
+
+async def _load_bureaus(db: AsyncSession) -> list[SummaryBureau]:
+    """Все бюро организации в порядке дерева: по отделу, затем по коду.
+
+    Уровень считается от корня (parent_id IS NULL): бюро — внук корня.
+    Если в бюро появятся группы, они уровнем ниже и колонками не станут.
+    """
+    division = aliased(Department)
+    root = aliased(Department)
+    stmt = (
+        select(
+            Department.id,
+            Department.code,
+            Department.name,
+            division.code,
+            division.name,
+        )
+        .join(division, division.id == Department.parent_id)
+        .join(root, root.id == division.parent_id)
+        .where(root.parent_id.is_(None))
+        .order_by(division.code, Department.code)
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        SummaryBureau(
+            id=b_id,
+            code=code,
+            name=name,
+            department_code=div_code,
+            department_name=div_name,
+        )
+        for b_id, code, name, div_code, div_name in rows
+    ]
+
+
+async def _load_project_rows(
+    db: AsyncSession,
+    mode: ReportMode,
+    date_from: date,
+    date_to: date,
+    bureau_ids: list[int],
+) -> list[SummaryRow]:
+    """Дни плана или факта: проект × бюро инженера на дату ячейки.
+
+    Цепочка до проекта: ячейка → пакет → комплект → строка состава →
+    проект. Заказчик — готовая строка Flask из project_registry_view
+    («"Каустик" АО, цех 24, корпус 5»), чтобы отчёт показывал его так же,
+    как Flask. Проекта вне реестра в представлении нет — тогда заказчик
+    просто предприятие.
+    """
+    cells: type[FactCalendarCell] | type[PlanCalendarCell] = (
+        FactCalendarCell if mode is ReportMode.FACT else PlanCalendarCell
+    )
+    customer = func.coalesce(VProjectRegistry.customer_display_name, Enterprise.name)
+    stmt = (
+        select(
+            Project.id,
+            Project.code,
+            customer,
+            Project.title,
+            EmployeeAssignment.department_id,
+            func.count(),
+        )
+        .select_from(cells)
+        .join(WorkPackage, WorkPackage.id == cells.package_id)
+        .join(ProjectMarkSet, ProjectMarkSet.id == WorkPackage.mark_set_id)
+        .join(
+            ProjectComposition,
+            ProjectComposition.id == ProjectMarkSet.composition_id,
+        )
+        .join(Project, Project.id == ProjectComposition.project_id)
+        .join(Enterprise, Enterprise.id == Project.enterprise_id)
+        .outerjoin(VProjectRegistry, VProjectRegistry.project_id == Project.id)
+        # Бюро — по назначению на дату ячейки, а не на сегодня.
+        .join(
+            EmployeeAssignment,
+            and_(
+                EmployeeAssignment.employee_id == cells.employee_id,
+                is_current_assignment(cells.work_date),
+            ),
+        )
+        .where(
+            cells.work_date.between(date_from, date_to),
+            EmployeeAssignment.department_id.in_(bureau_ids),
+        )
+        .group_by(
+            Project.id,
+            VProjectRegistry.customer_display_name,
+            Enterprise.name,
+            EmployeeAssignment.department_id,
+        )
+        .order_by(Project.code)
+    )
+    # Строки одного проекта идут подряд (сортировка по коду), словарь
+    # сохраняет этот порядок.
+    by_project: dict[int, SummaryRow] = {}
+    for project_id, code, cust, title, bureau_id, count in await db.execute(stmt):
+        row = by_project.get(project_id)
+        if row is None:
+            row = SummaryRow(title=title, days={}, code=code, customer=cust)
+            by_project[project_id] = row
+        row.days[bureau_id] = count
+    return list(by_project.values())
+
+
+async def _load_absence_rows(
+    db: AsyncSession,
+    date_from: date,
+    date_to: date,
+    bureau_ids: list[int],
+) -> list[SummaryRow]:
+    """Неявки из табеля: вид неявки × бюро, только рабочие дни.
+
+    Неявка в табеле — период вместе с выходными. Считаются только дни
+    периода отчёта, рабочие по производственному календарю: иначе 14
+    дней отпуска весили бы больше 10 рабочих дней факта. Бюро — по
+    назначению на каждый такой день.
+    """
+    type_rows = (
+        await db.execute(
+            select(AbsenceType.id, AbsenceType.code, AbsenceType.name).where(
+                AbsenceType.code.in_(REPORT_ABSENCE_CODES)
+            )
+        )
+    ).all()
+    # Строки — в порядке REPORT_ABSENCE_CODES, а не в порядке выборки.
+    order = {code: index for index, code in enumerate(REPORT_ABSENCE_CODES)}
+    types = sorted(type_rows, key=lambda r: order[r.code])
+    rows = {type_id: SummaryRow(title=name, days={}) for type_id, _, name in types}
+
+    day = ProductionCalendar.work_date
+    stmt = (
+        select(
+            AbsencePeriod.absence_type_id,
+            EmployeeAssignment.department_id,
+            func.count(),
+        )
+        .select_from(AbsencePeriod)
+        .join(
+            ProductionCalendar,
+            day.between(AbsencePeriod.date_from, AbsencePeriod.date_to),
+        )
+        .join(
+            DayType,
+            and_(DayType.id == ProductionCalendar.day_type_id, DayType.is_working),
+        )
+        .join(
+            EmployeeAssignment,
+            and_(
+                EmployeeAssignment.employee_id == AbsencePeriod.employee_id,
+                is_current_assignment(day),
+            ),
+        )
+        .where(
+            AbsencePeriod.absence_type_id.in_(rows.keys()),
+            day.between(date_from, date_to),
+            EmployeeAssignment.department_id.in_(bureau_ids),
+        )
+        .group_by(AbsencePeriod.absence_type_id, EmployeeAssignment.department_id)
+    )
+    for type_id, bureau_id, count in await db.execute(stmt):
+        rows[type_id].days[bureau_id] = count
+    return list(rows.values())
+
+
+async def load_summary_report(
+    db: AsyncSession,
+    *,
+    mode: ReportMode,
+    date_from: date,
+    date_to: date,
+) -> SummaryReport:
+    """Сводный отчёт «проекты × бюро» за период включительно.
+
+    Предела длины периода нет: запрос группирует, и размер ответа
+    зависит от числа проектов и бюро, а не от числа дней.
+
+    Raises:
+        InvalidIntervalError: начало периода позже конца.
+    """
+    if date_from > date_to:
+        raise InvalidIntervalError("начало периода позже конца")
+
+    bureaus = await _load_bureaus(db)
+    bureau_ids = [b.id for b in bureaus]
+    projects = await _load_project_rows(db, mode, date_from, date_to, bureau_ids)
+    # Неявки — в обоих режимах: табель знает и будущие отпуска, и в плане
+    # видно, сколько дней бюро выпадает.
+    absences = await _load_absence_rows(db, date_from, date_to, bureau_ids)
+
+    projects_total = _sum_rows("Итого по проектам", projects)
+    absences_total = _sum_rows("Итого неявки", absences)
+    return SummaryReport(
+        mode=mode,
+        date_from=date_from,
+        date_to=date_to,
+        bureaus=bureaus,
+        projects=projects,
+        absences=absences,
+        projects_total=projects_total,
+        absences_total=absences_total,
+        grand_total=_sum_rows("Всего", [projects_total, absences_total]),
+    )

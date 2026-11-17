@@ -1,15 +1,7 @@
 {# app/templates/admin/data.html #}
-{% extends "layouts/section.html" %}
-
-{# Раздел «Администрирование». Заведён на section.html сразу, хотя экран
-   пока один: следующие административные экраны ожидаются. Новый экран —
-   ещё один nav_item в блоке sidebar и свой шаблон. #}
+{% extends "layouts/admin.html" %}
 
 {% block title %}План и факт сотрудников{% endblock %}
-
-{% block sidebar %}
-  {{ nav_item("/admin/data", "План и факт", icon="file-pen-line") }}
-{% endblock %}
 
 {% block section_content %}
 <h1 class="h4 mb-1">План и факт сотрудников</h1>

@@ -1,0 +1,137 @@
+{# app/templates/admin/summary.html #}
+{% extends "layouts/admin.html" %}
+
+{# «Отчёт затраченных ресурсов»: проекты × бюро за период.
+
+   Страница открывается одной формой — отчёт строится только по кнопке.
+   Кнопки — два submit с одним именем mode: в адрес уходит значение
+   нажатой, поэтому ссылку на построенный отчёт можно сохранить.
+
+   В строках проектов и неявок нулевые ячейки пустые — так ненулевые
+   видны сразу; в итоговых строках ноль пишется. #}
+
+{% block title %}Отчёт затраченных ресурсов{% endblock %}
+
+{# Одна строка таблицы. Итоговая строка (is_total) пишет подпись на три
+   первые колонки и показывает нули; обычная — номер, заказчика и
+   наименование, нули не показывает. #}
+{% macro report_row(row, bureaus, is_total=false, row_class="") %}
+<tr{% if row_class %} class="{{ row_class }}"{% endif %}>
+  {% if is_total %}
+  <th scope="row" colspan="3">{{ row.title }}</th>
+  {% else %}
+  <td class="text-nowrap">{{ row.code or "" }}</td>
+  <td class="summary-report__customer" title="{{ row.customer or '' }}">{{ row.customer or "" }}</td>
+  <td class="summary-report__title" title="{{ row.title }}">{{ row.title }}</td>
+  {% endif %}
+  {% for bureau in bureaus %}
+  {% set days = row.days.get(bureau.id, 0) %}
+  <td class="text-end">{% if days or is_total %}{{ days }}{% endif %}</td>
+  {% endfor %}
+  <td class="text-end fw-semibold">{% if row.total or is_total %}{{ row.total }}{% endif %}</td>
+  <td class="text-end">{% if row.total or is_total %}{{ row.hours }}{% endif %}</td>
+</tr>
+{% endmacro %}
+
+{% block section_content %}
+<h1 class="h4 mb-3">Отчёт затраченных ресурсов</h1>
+
+{# GET, а не POST: отчёт только читает, а адрес с параметрами можно
+   сохранить и переслать. required — без обеих дат форма не уходит. #}
+<form method="get" action="/admin/summary" class="row g-2 align-items-end mb-3">
+  <div class="col-auto">
+    <label for="report-from" class="form-label small mb-1">Начало</label>
+    <input type="date" class="form-control form-control-sm" id="report-from"
+           name="from" value="{{ date_from.isoformat() }}" required>
+  </div>
+  <div class="col-auto">
+    <label for="report-to" class="form-label small mb-1">Конец</label>
+    <input type="date" class="form-control form-control-sm" id="report-to"
+           name="to" value="{{ date_to.isoformat() }}" required>
+  </div>
+  {# Цвет кнопки — смысл режима, как в сетке «План»: факт зелёный,
+     план синий. Обе контурные: ни один режим не главнее другого. #}
+  <div class="col-auto">
+    <button type="submit" name="mode" value="fact" class="btn btn-outline-success btn-sm">
+      Сформировать Факт
+    </button>
+  </div>
+  <div class="col-auto">
+    <button type="submit" name="mode" value="plan" class="btn btn-outline-primary btn-sm">
+      Плановые затраты
+    </button>
+  </div>
+</form>
+
+{% if error %}
+<div class="alert alert-warning py-2" role="alert">{{ error }}</div>
+{% elif report is none %}
+<p class="text-muted small">
+  Выберите период и нажмите «Сформировать Факт» или «Плановые затраты».
+</p>
+{% else %}
+{# Подзаголовок говорит, какой отчёт на экране: режим и период берутся
+   из самого отчёта, а не из полей формы — их могли уже поправить.
+   По той же причине из отчёта берёт параметры и ссылка выгрузки:
+   файл совпадает с тем, что на экране. #}
+<div class="d-flex flex-wrap align-items-center gap-3 mb-2">
+  <h2 class="h6 mb-0">
+    {{ "Факт" if report.mode.value == "fact" else "Плановые затраты" }}
+    за {{ report.date_from.strftime("%d.%m.%Y") }} – {{ report.date_to.strftime("%d.%m.%Y") }}
+  </h2>
+  <a class="btn btn-outline-secondary btn-sm d-inline-flex align-items-center gap-1"
+     href="/admin/summary.xlsx?from={{ report.date_from.isoformat() }}&amp;to={{ report.date_to.isoformat() }}&amp;mode={{ report.mode.value }}">
+    <span class="btn-icon" aria-hidden="true">{% include "icons/file-down.svg" %}</span>
+    Выгрузить в Excel
+  </a>
+</div>
+
+{% set bureaus = report.bureaus %}
+{# Ширина таблицы больше экрана: прокручивается блок, а не страница. #}
+<div class="table-responsive">
+  <table class="table table-sm table-bordered table-hover align-middle small">
+    <thead class="table-light">
+      {# Две строки шапки: отделы над своими бюро, затем бюро. Порядок
+         отделов — тот же, что у колонок (report.departments). #}
+      <tr>
+        <th rowspan="2" class="align-bottom">Номер проекта</th>
+        <th rowspan="2" class="align-bottom">Заказчик</th>
+        <th rowspan="2" class="align-bottom">Наименование работ</th>
+        {% for code, name, span in report.departments %}
+        <th colspan="{{ span }}" class="text-center" title="{{ name }}">{{ code }}</th>
+        {% endfor %}
+        <th rowspan="2" class="text-end align-bottom">Итого (дни)</th>
+        <th rowspan="2" class="text-end align-bottom">Чел.-часы (×8)</th>
+      </tr>
+      <tr>
+        {% for bureau in bureaus %}
+        <th class="text-end" title="{{ bureau.name }}">{{ bureau.code }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+
+    <tbody>
+      {% for row in report.projects %}
+      {{ report_row(row, bureaus) }}
+      {% else %}
+      <tr>
+        <td colspan="{{ 5 + bureaus | length }}" class="text-muted">Нет данных за период</td>
+      </tr>
+      {% endfor %}
+      {{ report_row(report.projects_total, bureaus, is_total=true) }}
+    </tbody>
+
+    <tbody class="table-group-divider">
+      {% for row in report.absences %}
+      {{ report_row(row, bureaus) }}
+      {% endfor %}
+      {{ report_row(report.absences_total, bureaus, is_total=true) }}
+    </tbody>
+
+    <tfoot class="table-group-divider">
+      {{ report_row(report.grand_total, bureaus, is_total=true, row_class="table-light") }}
+    </tfoot>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

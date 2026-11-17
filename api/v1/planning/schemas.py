@@ -208,7 +208,7 @@ class Rejection(BaseModel):
     React обрабатывает оба случая одним кодом.
     """
 
-    mark_set_id: int
+    package_id: int
     work_date: date
     state: DayState
     # Готовый текст для показа. Собирается на границе (routes.py), а не

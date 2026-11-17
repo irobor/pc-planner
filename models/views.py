@@ -91,3 +91,22 @@ class VProjectComposition(Base):
             f"project_id={self.project_id!r}, "
             f"marka_code={self.marka_code!r})"
         )
+
+class VProjectRegistry(Base):
+    """Строка представления project_registry_view (реестр проектов Flask).
+
+    Описаны только нужные нам колонки. Представление — объект Flask:
+    формат «Заказчика» (предприятие, «цех», корпуса) записан в его CASE,
+    Flask читает готовую строку. Сводный отчёт берёт её же, чтобы
+    показывать заказчика так же, как Flask, — правило одно на оба
+    приложения. Менять формат — в CASE представления, не в Python.
+
+    Псевдо-PK: представление строится от project_register, где project_id —
+    первичный ключ, и группирует по нему: одна строка на проект. Проекта
+    без записи в реестре в представлении нет.
+    """
+
+    __tablename__ = "project_registry_view"
+
+    project_id: Mapped[int] = mapped_column(primary_key=True)
+    customer_display_name: Mapped[str | None] = mapped_column()    

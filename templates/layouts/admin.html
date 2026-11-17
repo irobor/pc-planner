@@ -1,0 +1,14 @@
+{# app/templates/layouts/admin.html #}
+{% extends "layouts/section.html" %}
+
+{# Оболочка раздела «Администрирование». Боковое меню записано здесь
+   один раз — как в layouts/planning.html. Страницы раздела наследуют
+   эту оболочку и заполняют только section_content; о меню они не знают.
+
+   Отдельных условий у пунктов нет: в раздел пускают те же два права
+   (plan:override и fact:override), что требуются на каждом его экране.
+   Значки — файлы templates/icons/<имя>.svg (Lucide). #}
+{% block sidebar %}
+  {{ nav_item("/admin/data", "План и факт", icon="file-pen-line") }}
+  {{ nav_item("/admin/summary", "Отчёты", icon="table") }}
+{% endblock %}

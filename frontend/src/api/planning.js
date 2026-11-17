@@ -34,8 +34,8 @@ export async function fetchWorkload(departmentId, dateFrom, dateTo) {
 /**
  * Применяет пачку изменений плановых ячеек.
  *
- * operations — массив { op: 'add' | 'remove', mark_set_id, work_date }.
- * Исполнитель не передаётся: сервер выводит его из шифра.
+ * operations — массив { op: 'add' | 'remove', package_id, work_date }.
+ * Исполнитель не передаётся: сервер выводит его из пакета.
  *
  * Правило «всё или ничего»: при отказе не применяется ничего, и Error
  * несёт rejected со списком причин.

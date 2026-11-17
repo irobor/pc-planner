@@ -12,10 +12,9 @@ class Project(Base):
     """Проект — объект проектирования (соответствует public.projects).
 
     Схема — источник истины (правило 26): маппинг сверен построчно
-    с oulm.sql. Ссылки на ещё не реализованные модели (Enterprise,
-    Workshop, ProjectStage, Designer, ProjectStatus) заведены как
-    простые FK-колонки без relationship() — добавим при появлении
-    соответствующих моделей.
+    с oulm.sql. Ссылки на предприятие, цех, стадию, проектировщика и
+    статус заведены как простые FK-колонки без relationship(): запросы
+    делают явный JOIN. Связь добавим, когда она кому-то понадобится.
     """
 
     __tablename__ = "projects"
@@ -74,3 +73,55 @@ class Project(Base):
 
     def __repr__(self) -> str:
         return f"Project(id={self.id!r}, code={self.code!r}, title={self.title!r})"
+
+
+class Enterprise(Base):
+    """Предприятие. Таблица контура Flask, наш контур только читает.
+
+    Цель FK projects.enterprise_id. Сводному отчёту — запасная подпись
+    «Заказчика» для проекта вне реестра Flask (VProjectRegistry). Поля —
+    строго по DDL. Связи (relationship) не заведены: запросы делают явный
+    JOIN.
+    """
+
+    __tablename__ = "enterprises"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    city: Mapped[str | None] = mapped_column(String(100))
+
+    def __repr__(self) -> str:
+        return f"Enterprise(id={self.id!r}, name={self.name!r})"
+
+
+class Workshop(Base):
+    """Цех предприятия. Таблица контура Flask, наш контур только читает.
+
+    Цель FK projects.workshop_id: без модели metadata не знает этой
+    таблицы, и сверка моделей со схемой (Alembic) падает. Поля и
+    ограничения — строго по DDL.
+    """
+
+    __tablename__ = "workshops"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    enterprise_id: Mapped[int] = mapped_column(
+        ForeignKey("enterprises.id", onupdate="CASCADE", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workshop_name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    __table_args__ = (
+        # Название цеха уникально в пределах предприятия.
+        UniqueConstraint(
+            "enterprise_id",
+            "workshop_name",
+            name="workshops_enterprise_id_workshop_name_key",
+        ),
+        # Цель композитного FK проекта (projects_workshop_enterprise_fkey):
+        # цех проекта обязан принадлежать предприятию проекта.
+        UniqueConstraint("id", "enterprise_id", name="workshops_id_enterprise_id_key"),
+    )
+
+    def __repr__(self) -> str:
+        return f"Workshop(id={self.id!r}, workshop_name={self.workshop_name!r})"

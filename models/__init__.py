@@ -41,7 +41,9 @@ from app.models.user import (  # noqa: F401
 from app.models.employee import Employee, EmployeeAssignment, Position  # noqa: F401
 
 # Модель боевой таблицы projects (read-only для нашего контура).
-from app.models.project import Project  # noqa: F401
+# Enterprise, Workshop — таблицы Flask, только чтение: цели FK проекта
+# в metadata; Enterprise — ещё и запасной «Заказчик» сводного отчёта.
+from app.models.project import Enterprise, Project, Workshop  # noqa: F401
 
 # Модели раздела «Состав проекта» + связующие Table.
 # Пакеты работ и их статусы живут здесь же: пакет — часть комплекта
@@ -73,6 +75,10 @@ from app.models.planning import (  # noqa: F401
 # Отдельный модуль: это SELECT, а не сущность, в которую пишут.
 from app.models.views import VProjectComposition  # noqa: F401
 
+# Реестр проектов Flask (VIEW project_registry_view): готовая строка
+# «Заказчик» для сводного отчёта.
+from app.models.views import VProjectRegistry  # noqa: F401
+
 
 # Публичный API пакета: что видно при from app.models import *.
 # Table-объекты (user_roles, role_permissions, department_markas,
@@ -89,6 +95,8 @@ __all__ = [
     "user_roles",
     "role_permissions",
     "Project",
+    "Enterprise",
+    "Workshop",
     "Department",
     "MarkaType",
     "ProjectStage",
@@ -99,6 +107,7 @@ __all__ = [
     "department_markas",
     "marka_to_stage",
     "VProjectComposition",
+    "VProjectRegistry",
     "DayType",
     "ProductionCalendar",
     "AbsenceType",

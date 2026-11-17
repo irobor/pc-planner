@@ -16,7 +16,7 @@
 from dataclasses import dataclass
 from datetime import date
 
-from sqlalchemy import ColumnElement, and_, or_, select
+from sqlalchemy import ColumnElement, SQLColumnExpression, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.composition import Department
@@ -24,8 +24,14 @@ from app.models.employee import EmployeeAssignment, Position
 from app.models.user import User
 
 
-def is_current_assignment(today: date) -> ColumnElement[bool]:
+def is_current_assignment(
+    today: date | SQLColumnExpression[date],
+) -> ColumnElement[bool]:
     """Условие WHERE: назначение действует на дату today.
+
+    today — конкретная дата или колонка с датой: сводный отчёт ищет
+    назначение на дату каждой ячейки (FactCalendarCell.work_date), чтобы
+    день переведённого сотрудника попал в бюро, где он тогда числился.
 
     Граница valid_to ВКЛЮЧИТЕЛЬНАЯ — так же, как daterange(..., '[]') в
     EXCLUDE-ограничении employee_assignments_no_overlap: в последний день
