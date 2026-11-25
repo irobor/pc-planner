@@ -5,10 +5,12 @@
    один раз — как в layouts/planning.html. Страницы раздела наследуют
    эту оболочку и заполняют только section_content; о меню они не знают.
 
-   Отдельных условий у пунктов нет: в раздел пускают те же два права
-   (plan:override и fact:override), что требуются на каждом его экране.
+   Права проверяются в соответствующих HTML-маршрутах. У «Плана и факта»
+   и «Отчётов» это plan:override и fact:override, у «Марок» —
+   reference:manage. Пункты меню не дублируют серверные проверки.
    Значки — файлы templates/icons/<имя>.svg (Lucide). #}
 {% block sidebar %}
   {{ nav_item("/admin/data", "План и факт", icon="file-pen-line") }}
   {{ nav_item("/admin/summary", "Отчёты", icon="table") }}
+  {{ nav_item("/admin/marks", "Марки", icon="tags") }}
 {% endblock %}

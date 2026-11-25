@@ -5,15 +5,19 @@
     GET /admin/data          — «План и факт сотрудников» (ремонтный режим)
     GET /admin/summary       — «Отчёты»: сводная таблица «проекты × бюро»
     GET /admin/summary.xlsx  — тот же отчёт файлом Excel
+    GET /admin/marks         — редактор справочника марок
 
 Раздел на layouts/section.html с боковым меню; меню описано один раз в
 оболочке layouts/admin.html.
 
-Права — ОБА: plan:override и fact:override, как у ручек /api/admin.
-Проверка только через гард RequirePermissionHtml, то есть через
-User.can(): роль admin проходит через обход прав, роль data_admin — по
-своим правам. Проверять is_superuser нельзя: у администратора данных
-его нет. Кадровая карточка не нужна.
+Права проверяются гардом RequirePermissionHtml через User.can():
+- /admin, /admin/data, /admin/summary и /admin/summary.xlsx требуют
+  plan:override и fact:override;
+- /admin/marks требует reference:manage.
+
+Роль admin проходит через обход прав, роль data_admin — по назначенным
+ей правам. Проверять is_superuser нельзя: у администратора данных его
+нет. Кадровая карточка не нужна.
 
 /admin/data только отдаёт оболочку: сетку рисует React-остров, данные он
 берёт сам через /api/admin/*. /admin/summary — серверная страница: отчёт
@@ -48,6 +52,7 @@ router = APIRouter()
 
 PLAN_OVERRIDE = "plan:override"
 FACT_OVERRIDE = "fact:override"
+REFERENCE_MANAGE = "reference:manage"
 
 
 @router.get("/admin", response_class=RedirectResponse)
@@ -74,6 +79,30 @@ async def admin_data_page(
 ) -> HTMLResponse:
     """«План и факт сотрудников» — правка без процессных ограничений."""
     return templates.TemplateResponse("admin/data.html", {"request": request})
+
+@router.get(
+    "/admin/marks",
+    response_class=HTMLResponse,
+    tags=["Web Администрирование"],
+    summary="Редактор справочника марок",
+    status_code=200,
+)
+async def admin_marks_page(
+    request: Request,
+    _reference: Annotated[
+        User, Depends(RequirePermissionHtml(REFERENCE_MANAGE))
+    ],
+) -> HTMLResponse:
+    """Страница редактора справочника марок.
+
+    Для справочника используется отдельное право: его редактирование
+    не должно зависеть от прав на исправление плана и факта.
+    """
+    return templates.TemplateResponse(
+        request,
+        "admin/marks.html",
+        {},
+    )
 
 def _current_month(today: date) -> tuple[date, date]:
     """Первый и последний день месяца, в который входит today."""
