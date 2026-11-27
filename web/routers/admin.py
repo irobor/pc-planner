@@ -28,9 +28,11 @@ from datetime import date, timedelta
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.api.v1.admin.export import (
     XLSX_MEDIA_TYPE,
@@ -45,8 +47,16 @@ from app.api.v1.admin.service import (
 )
 from app.core.dependencies import get_db
 from app.core.guards import RequirePermissionHtml
+from app.models import (
+    Department,
+    MarkaType,
+    ProjectComposition,
+    ProjectStage,
+    marka_to_stage,
+)
 from app.models.user import User
-from app.web.templates import templates
+from app.web.templates import flash, templates
+
 
 router = APIRouter()
 
@@ -80,6 +90,109 @@ async def admin_data_page(
     """«План и факт сотрудников» — правка без процессных ограничений."""
     return templates.TemplateResponse("admin/data.html", {"request": request})
 
+
+async def _load_mark_bureaus(db: AsyncSession) -> list[dict]:
+    """Загружает только бюро третьего уровня и группирует по отделам."""
+
+    division = aliased(Department)
+    root = aliased(Department)
+
+    stmt = (
+        select(
+            Department,
+            division.id,
+            division.code,
+            division.name,
+        )
+        .join(division, division.id == Department.parent_id)
+        .join(root, root.id == division.parent_id)
+        .where(root.parent_id.is_(None))
+        .order_by(division.code, Department.code)
+    )
+
+    rows = (await db.execute(stmt)).all()
+    groups = {}
+
+    for bureau, division_id, division_code, division_name in rows:
+        group = groups.setdefault(
+            division_id,
+            {
+                "code": division_code,
+                "name": division_name,
+                "bureaus": [],
+            },
+        )
+        group["bureaus"].append(bureau)
+
+    return list(groups.values())
+
+
+async def _load_marks_page_data(db: AsyncSession) -> dict:
+    """Загружает список марок и справочники для формы."""
+
+    stmt = (
+        select(
+            MarkaType,
+            ProjectStage.stage_name,
+            func.count(ProjectComposition.id).label("composition_count"),
+        )
+        .join(
+            marka_to_stage,
+            marka_to_stage.c.marka_type_id == MarkaType.id,
+        )
+        .join(
+            ProjectStage,
+            ProjectStage.id == marka_to_stage.c.stage_id,
+        )
+        .outerjoin(
+            ProjectComposition,
+            ProjectComposition.marka_type_id == MarkaType.id,
+        )
+        .group_by(
+            MarkaType.id,
+            ProjectStage.id,
+            ProjectStage.stage_name,
+        )
+        .order_by(MarkaType.code, MarkaType.id)
+    )
+
+    rows = (await db.execute(stmt)).all()
+
+    stage_order = ("РД", "ПД", "Без стадии", "ПД/РД")
+    grouped = {}
+
+    for marka, stage_name, composition_count in rows:
+        grouped.setdefault(stage_name, []).append(
+            {
+                "marka": marka,
+                "composition_count": composition_count,
+            }
+        )
+
+    marka_groups = [
+        {
+            "stage_name": stage_name,
+            "markas": grouped[stage_name],
+        }
+        for stage_name in stage_order
+        if stage_name in grouped
+    ]
+
+    stages = (
+        await db.execute(
+            select(ProjectStage).order_by(ProjectStage.stage_name)
+        )
+    ).scalars().all()
+
+    bureaus = await _load_mark_bureaus(db)
+
+    return {
+        "marka_groups": marka_groups,
+        "stages": stages,
+        "bureau_groups": bureaus,
+    }
+
+
 @router.get(
     "/admin/marks",
     response_class=HTMLResponse,
@@ -89,20 +202,150 @@ async def admin_data_page(
 )
 async def admin_marks_page(
     request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
     _reference: Annotated[
         User, Depends(RequirePermissionHtml(REFERENCE_MANAGE))
     ],
 ) -> HTMLResponse:
-    """Страница редактора справочника марок.
+    """Список марок с количеством записей состава."""
 
-    Для справочника используется отдельное право: его редактирование
-    не должно зависеть от прав на исправление плана и факта.
-    """
+    page_data = await _load_marks_page_data(db)
+
     return templates.TemplateResponse(
         request,
         "admin/marks.html",
-        {},
+        {
+            **page_data,
+            "error": None,
+            "form_values": {},
+        },
     )
+
+
+@router.post(
+    "/admin/marks",
+    response_class=HTMLResponse,
+    tags=["Web Администрирование"],
+    summary="Создание марки",
+    status_code=303,
+)
+async def admin_marks_create(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _reference: Annotated[
+        User, Depends(RequirePermissionHtml(REFERENCE_MANAGE))
+    ],
+    code: Annotated[str, Form()],
+    name: Annotated[str, Form()],
+    stage_id: Annotated[str, Form()],
+    bureau_ids: Annotated[list[int] | None, Form()] = None,
+) -> Response:
+    """Создаёт марку и её связи со стадией и бюро."""
+
+    code = code.strip()
+    name = name.strip()
+    stage_id = stage_id.strip()
+    selected_ids = set(bureau_ids or [])
+
+    error = None
+
+    if not code or not name or not stage_id or not selected_ids:
+        error = "empty"
+    elif len(code) > 20:
+        error = "too_long"
+
+    stage = None
+
+    if error is None:
+        try:
+            parsed_stage_id = int(stage_id)
+        except ValueError:
+            error = "not_found"
+        else:
+            stage = await db.get(ProjectStage, parsed_stage_id)
+            if stage is None:
+                error = "not_found"
+
+    selected_bureaus = []
+
+    if selected_ids:
+        bureau_rows = await db.execute(
+            select(Department).where(Department.id.in_(selected_ids))
+        )
+        selected_bureaus = bureau_rows.scalars().all()
+
+        # Проверяем, что переданные id принадлежат именно бюро текущей
+        # иерархии, а не произвольным подразделениям.
+        allowed_bureaus = {
+            bureau.id
+            for group in await _load_mark_bureaus(db)
+            for bureau in group["bureaus"]
+        }
+
+        if selected_ids - allowed_bureaus:
+            error = "not_found"
+
+    # Не допускаем повтор одной пары «код марки + стадия».
+    # Сам по себе код не уникален: он может использоваться на разных стадиях.
+    if error is None:
+        duplicate_stmt = (
+            select(MarkaType.id)
+            .join(
+                marka_to_stage,
+                marka_to_stage.c.marka_type_id == MarkaType.id,
+            )
+            .where(
+                MarkaType.code == code,
+                marka_to_stage.c.stage_id == parsed_stage_id,
+            )
+            .limit(1)
+        )
+        duplicate_id = await db.scalar(duplicate_stmt)
+
+        if duplicate_id is not None:
+            error = "mark_stage_exists"
+
+    if error:
+        page_data = await _load_marks_page_data(db)
+        return templates.TemplateResponse(
+            request,
+            "admin/marks.html",
+            {
+                **page_data,
+                "created": False,
+                "error": error,
+                "form_values": {
+                    "code": code,
+                    "name": name,
+                    "stage_id": stage_id,
+                    "bureau_ids": selected_ids,
+                },
+            },
+            status_code=200,
+        )
+
+    marka = MarkaType(
+        code=code,
+        name=name,
+        allowed_stages=[stage],
+        departments=selected_bureaus,
+    )
+
+    db.add(marka)
+
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    flash(request, "success", "Марка успешно создана.")
+
+    return RedirectResponse(
+        url="/admin/marks",
+        status_code=303,
+    )
+
 
 def _current_month(today: date) -> tuple[date, date]:
     """Первый и последний день месяца, в который входит today."""
@@ -111,6 +354,7 @@ def _current_month(today: date) -> tuple[date, date]:
     # коротким ни был текущий.
     next_first = (first + timedelta(days=32)).replace(day=1)
     return first, next_first - timedelta(days=1)
+
 
 @router.get("/admin/summary", response_class=HTMLResponse)
 async def admin_summary_page(

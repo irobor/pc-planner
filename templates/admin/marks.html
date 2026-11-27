@@ -1,11 +1,211 @@
-{# app/templates/admin/marks.html #}
+{# Страница использует общую административную оболочку. #}
 {% extends "layouts/admin.html" %}
-
-{# Страница использует общую административную оболочку, чтобы не
-   дублировать боковое меню и структуру раздела. #}
 
 {% block title %}Справочник марок{% endblock %}
 
 {% block section_content %}
 <h1 class="h4 mb-3">Справочник марок</h1>
+<div class="d-flex justify-content-end mb-3">
+  <button
+    type="button"
+    class="btn btn-primary"
+    data-bs-toggle="modal"
+    data-bs-target="#addMarkModal"
+  >
+    <span aria-hidden="true">+</span>
+    Добавить марку
+  </button>
+</div>
+
+
+
+{% if error %}
+<div class="alert alert-danger" role="alert">
+  {% if error == "empty" %}
+    Заполните код, название, выберите стадию и хотя бы одно бюро.
+  {% elif error == "too_long" %}
+    Код марки не должен превышать 20 символов.
+  {% elif error == "not_found" %}
+    Выбранная стадия или бюро больше недоступны.
+  {% elif error == "mark_stage_exists" %}
+     Марка с таким кодом уже существует на выбранной стадии.
+  {% endif %}
+</div>
+{% endif %}
+
+<div
+  class="modal fade"
+  id="addMarkModal"
+  tabindex="-1"
+  aria-labelledby="addMarkModalLabel"
+  aria-hidden="true"
+>
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <form method="post" action="/admin/marks">
+        <div class="modal-header">
+          <h2 class="modal-title fs-5" id="addMarkModalLabel">
+            Добавить марку
+          </h2>
+          <button
+            type="button"
+            class="btn-close"
+            data-bs-dismiss="modal"
+            aria-label="Закрыть"
+          ></button>
+        </div>
+
+        <div class="modal-body">
+          <div class="row g-3 mb-3">
+            <div class="col-md-3">
+              <label for="mark-code" class="form-label">Код</label>
+              <input
+                id="mark-code"
+                name="code"
+                type="text"
+                class="form-control"
+                maxlength="20"
+                required
+                value="{{ form_values.get('code', '') }}"
+              >
+            </div>
+
+            <div class="col-md-6">
+              <label for="mark-name" class="form-label">Название</label>
+              <input
+                id="mark-name"
+                name="name"
+                type="text"
+                class="form-control"
+                required
+                value="{{ form_values.get('name', '') }}"
+              >
+            </div>
+
+            <div class="col-md-3">
+              <label for="mark-stage" class="form-label">Стадия</label>
+              <select
+                id="mark-stage"
+                name="stage_id"
+                class="form-select"
+                required>
+               <option value="" disabled hidden
+                  {% if not form_values.get('stage_id') %}selected{% endif %}
+                  >
+                  Выберите стадию
+               </option>
+                {% for stage in stages %}
+                <option
+                  value="{{ stage.id }}"
+                  {% if form_values.get('stage_id') == stage.id|string %}
+                    selected
+                  {% endif %}
+                >
+                  {{ stage.stage_name }}
+                </option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+
+          <fieldset>
+            <legend class="form-label">Бюро</legend>
+
+            {% for group in bureau_groups %}
+            <div class="mb-2">
+              <div class="small fw-semibold mb-1">
+                {{ group.code }} — {{ group.name }}
+              </div>
+
+              <div class="row g-2">
+                {% for bureau in group.bureaus %}
+                <div class="col-sm-6 col-md-4 col-lg-3">
+                  <div class="form-check">
+                    <input
+                      class="form-check-input"
+                      type="checkbox"
+                      name="bureau_ids"
+                      value="{{ bureau.id }}"
+                      id="bureau-{{ bureau.id }}"
+                      {% if bureau.id in form_values.get('bureau_ids', []) %}
+                        checked
+                      {% endif %}
+                    >
+                    <label
+                      class="form-check-label"
+                      for="bureau-{{ bureau.id }}"
+                    >
+                      {{ bureau.code }} — {{ bureau.name }}
+                    </label>
+                  </div>
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+            {% endfor %}
+          </fieldset>
+        </div>
+
+        <div class="modal-footer">
+          <button
+            type="button"
+            class="btn btn-secondary"
+            data-bs-dismiss="modal"
+          >
+            Отмена
+          </button>
+          <button type="submit" class="btn btn-primary">
+            Добавить марку
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="table-responsive">
+  <table class="table table-sm table-striped table-hover align-middle">
+    <thead class="table-light">
+      <tr>
+        <th scope="col">Марка</th>
+        <th scope="col">Название</th>
+        <th scope="col">В составе</th>
+      </tr>
+    </thead>
+
+    {% for group in marka_groups %}
+    <tbody>
+      <tr class="table-light">
+        <th scope="rowgroup" colspan="3">
+          {{ group.stage_name }}
+        </th>
+      </tr>
+
+      {% for item in group.markas %}
+      <tr>
+        <td class="text-nowrap">{{ item.marka.code }}</td>
+        <td>{{ item.marka.name }}</td>
+        <td class="text-nowrap">
+          {% if item.composition_count %}
+          <span class="badge text-bg-success">
+            Да ({{ item.composition_count }})
+          </span>
+          {% else %}
+          <span class="text-muted">Нет</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    {% else %}
+    <tbody>
+      <tr>
+        <td colspan="3" class="text-muted">
+          В справочнике пока нет марок.
+        </td>
+      </tr>
+    </tbody>
+    {% endfor %}
+  </table>
+</div>
 {% endblock %}

@@ -1108,3 +1108,96 @@ thead .fact-matrix__day--today {
     min-width: 18rem;
     max-width: 18rem;
 }
+
+
+/* ==========================================================================
+   Flash / Toast — одноразовые уведомления FastAPI.
+   Уведомления располагаются поверх страницы и не меняют её геометрию.
+   ========================================================================== */
+
+#toast-container {
+    z-index: 1090;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    width: min(26rem, calc(100vw - 2rem));
+    pointer-events: none;
+}
+
+.toast-notification {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--bs-border-color);
+    border-left: 4px solid var(--bs-secondary);
+    border-radius: var(--bs-border-radius-lg);
+    background-color: var(--bs-body-bg);
+    color: var(--bs-body-color);
+    box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.14);
+    pointer-events: auto;
+    opacity: 0;
+    transform: translateX(1rem);
+    transition:
+        opacity 0.2s ease,
+        transform 0.2s ease;
+}
+
+.toast-notification--visible {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.toast-notification--leaving {
+    opacity: 0;
+    transform: translateX(1rem);
+}
+
+.toast-notification--success {
+    border-left-color: var(--bs-success);
+}
+
+.toast-notification--error {
+    border-left-color: var(--bs-danger);
+}
+
+.toast-notification--warning {
+    border-left-color: var(--bs-warning);
+}
+
+.toast-notification--info {
+    border-left-color: var(--bs-info);
+}
+
+.toast-notification__message {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.toast-notification__close {
+    flex-shrink: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--bs-secondary-color);
+    font-size: 1.25rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.toast-notification__close:hover {
+    color: var(--bs-body-color);
+}
+
+.toast-notification__close:focus-visible {
+    outline: 2px solid var(--bs-primary);
+    outline-offset: 3px;
+    border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .toast-notification {
+        transition: none;
+    }
+}

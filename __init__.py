@@ -2,6 +2,8 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware  # ← Добавили импорт
+from app.core.config import settings
+from starlette.middleware.sessions import SessionMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.v1.router import api_router
 from app.web.router import web_router
@@ -38,6 +40,15 @@ def create_app() -> FastAPI:
         allow_methods=["*"],              # Разрешаем любые методы (GET, POST, POST, DELETE)
         allow_headers=["*"],              # Разрешаем любые HTTP-заголовки
     )
+    # Сессия нужна HTML-механизму одноразовых flash-уведомлений.
+    # Данные cookie подписываются существующим секретным ключом приложения.
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=settings.SECRET_KEY,
+        https_only=settings.SESSION_COOKIE_SECURE,
+        same_site="lax",
+    )
+
     # -----------------------
     #----------вставка no-store для вошедшего
     # Гард защищённых HTML-страниц: редирект гостя + no-store вошедшему.

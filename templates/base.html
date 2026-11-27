@@ -30,11 +30,42 @@
        Служебные страницы (login, errors) кладут контент сюда напрямую. #}
     {% block body %}{% endblock %}
 
+    {# Общий контейнер одноразовых уведомлений для всех HTML-страниц. #}
+    <div
+        id="toast-container"
+        class="toast-container position-fixed top-0 end-0 p-3"
+        aria-live="polite"
+        aria-atomic="false"
+    >
+        {% for item in flash_messages %}
+        <div
+            class="toast-notification toast-notification--{{ item.category }}"
+            data-toast
+            role="{{ 'alert' if item.category == 'error' else 'status' }}"
+        >
+            <span class="toast-notification__message">
+                {{ item.message }}
+            </span>
+            <button
+                type="button"
+                class="toast-notification__close"
+                data-toast-close
+                aria-label="Закрыть уведомление"
+            >
+                &times;
+            </button>
+        </div>
+        {% endfor %}
+    </div>
+
     {# Bootstrap JS — блок со значением по умолчанию: страница получает его
        автоматически, но может переопределить пустым, если он не нужен. #}
     {% block vendor_js %}
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     {% endblock %}
+
+    {# Общая логика одноразовых Flash / Toast уведомлений. #}
+    <script src="/static/js/flash.js"></script>
 
     {# Индивидуальные скрипты страницы (login.js, react-бандл планировщика). #}
     {% block extra_js %}{% endblock %}

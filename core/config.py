@@ -6,6 +6,9 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    # Защищённая cookie сессии: включается в окружении с HTTPS.
+    SESSION_COOKIE_SECURE: bool = False
+
 
     # Указываем путь к .env файлу и добавляем extra="ignore"
     model_config = SettingsConfigDict(
